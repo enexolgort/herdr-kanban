@@ -10,6 +10,11 @@ All notable changes to the Kanban mod. Dates are when the change was made.
   with its agent status. The linked card shows that tab's status live on the board (working,
   needs you, done, idle), and clicking it goes to the tab, switching space if needed. "Go to
   tab", "Change" and "Unlink" are in the card's Tab row. A closed tab shows as "(closed)".
+- **Labels.** The board has its own colored labels (bug, feature, homelab and idea to start).
+  Toggle them in an open card's Labels row, where "+ Label" makes a new one (Enter; it takes the
+  next color) and × deletes a label no card uses. Cards show their labels as pills above the
+  title. The header has a filter with one button per label in use: click one to show only its
+  cards ("2 of 5 cards"), click it again to show them all.
 
 ## 0.1.0 — 2026-11-13
 

@@ -48,6 +48,22 @@ function urgency(due, col) {
   return { color: null, label: `Due ${short(due)}` };
 }
 
+// ---- Labels: the board's own list ({id, name, color}), each card keeps label ids ----
+const LABEL_COLORS = ["ansi1", "ansi3", "ansi2", "ansi6", "ansi4", "ansi5"];
+const DEFAULT_LABELS = [
+  { id: "bug", name: "bug", color: "ansi1" },
+  { id: "feature", name: "feature", color: "ansi4" },
+  { id: "homelab", name: "homelab", color: "ansi2" },
+  { id: "idea", name: "idea", color: "ansi5" },
+];
+const boardLabels = (b) => b.labels ?? DEFAULT_LABELS;
+
+/** A small colored label pill. */
+function pill(t, label, size = 10.5) {
+  const c = t[label.color] ?? t.muted;
+  return div().px(6).rounded(5).text_size(size).bg(tint(c, "33")).text_color(c).child(label.name);
+}
+
 // ---- Linked tabs: a card can point at a tab and show its agents' status ----
 const STATUS_LABEL = { working: "working", blocked: "needs you", done: "done", idle: "idle" };
 
@@ -125,6 +141,23 @@ export default class Kanban extends View {
     });
     this.picking = false;
     this.linking = false;
+    // A new label: Enter makes it (next color in turn) and puts it on this card.
+    this.addingLabel = false;
+    this.newLabel = InputState.new({ placeholder: "Label name" });
+    this.newLabel.on("submit", (_e, cx) => {
+      const name = this.newLabel.value().trim();
+      if (name) {
+        this.save((b) => {
+          const all = boardLabels(b);
+          let l = all.find((x) => x.name.toLowerCase() === name.toLowerCase());
+          if (!l) { l = { id: uid(), name, color: LABEL_COLORS[all.length % LABEL_COLORS.length] }; b.labels = [...all, l]; }
+          for (const col of b.columns) for (const c of col.cards) if (c.id === this.open) c.labels = [...new Set([...(c.labels ?? []), l.id])];
+        });
+      }
+      this.addingLabel = false;
+      cx.notify();
+    });
+    this.newLabel.on("blur", (_e, cx) => { this.addingLabel = false; cx.notify(); });
     this.calendar = CalendarState.new();
     if (found?.card.due) this.calendar.set_value(found.card.due);
     this.calendar.on("change", (date, cx) => {
@@ -172,7 +205,7 @@ export default class Kanban extends View {
       .text_color(on ? t.foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { action(); cx.notify(); }).child(label);
     const row = h_flex().gap(6).items_center().flex_wrap()
-      .child(div().w(34).text_size(11.5).text_color(t.dim).child("Due"))
+      .child(div().w(46).flex_none().text_size(11.5).text_color(t.dim).child("Due"))
       .child(chip("due-today", "Today", card.due === today(), () => this.setDue(today())))
       .child(chip("due-tomorrow", "Tomorrow", card.due === plus(1), () => this.setDue(plus(1))))
       .child(chip("due-week", "In a week", card.due === plus(7), () => this.setDue(plus(7))))
@@ -212,7 +245,7 @@ export default class Kanban extends View {
       .on_click((_e, cx) => { action(); cx.notify(); })
       .when(Boolean(color), (el) => el.child(div().size(7).rounded(4).bg(color))).child(label);
     const l = linked(card.link);
-    let row = h_flex().gap(6).items_center().flex_wrap().child(div().w(34).text_size(11.5).text_color(t.dim).child("Tab"));
+    let row = h_flex().gap(6).items_center().flex_wrap().child(div().w(46).flex_none().text_size(11.5).text_color(t.dim).child("Tab"));
     if (card.link) {
       row = row.child(div().text_size(12).text_color(l ? t.foreground : t.dim).child(l ? `${l.space.name} › ${tabLabel(l.tab)}` : `${card.link.name} (closed)`))
         .when(Boolean(l?.tab.status), (el) => el.child(h_flex().gap(5).items_center().text_size(11.5).text_color(t[l.tab.status])
@@ -241,6 +274,37 @@ export default class Kanban extends View {
             .child(div().size(7).rounded(4).bg(x.status ? t[x.status] : t.border))
             .child(div().flex_1().truncate().child(tabLabel(x)))
             .when(Boolean(x.status), (el) => el.child(div().text_size(11).text_color(t.dim).child(STATUS_LABEL[x.status]))))))));
+  }
+
+  // The Labels row: click a label to put it on the card or take it off; "+ Label" makes one.
+  // A label no card uses has a × to delete it from the board.
+  renderLabels(t, card) {
+    const b = this.board(), all = boardLabels(b), on = new Set(card.labels ?? []);
+    const used = new Set(b.columns.flatMap((c) => c.cards.flatMap((x) => x.labels ?? [])));
+    const chip = (l) => {
+      const c = t[l.color] ?? t.muted, sel = on.has(l.id);
+      return h_flex().id(`lb-${l.id}`).h(24).pl(9).pr(sel || used.has(l.id) ? 9 : 4).gap(4).items_center().rounded(12).text_size(11.5)
+        .border_1().border_color(sel ? c : t.border).bg(sel ? tint(c, "33") : t.background).text_color(sel ? c : t.muted)
+        .cursor_pointer().hover((s) => s.bg(sel ? tint(c, "4d") : t.hover))
+        .on_click((_e, cx) => {
+          this.updateCard((x) => { const ids = new Set(x.labels ?? []); ids.has(l.id) ? ids.delete(l.id) : ids.add(l.id); x.labels = [...ids]; if (!x.labels.length) delete x.labels; });
+          cx.notify();
+        })
+        .child(div().size(7).rounded(4).bg(c)).child(l.name)
+        .when(!used.has(l.id) && !sel, (el) => el.child(div().id(`lbx-${l.id}`).w(16).h(16).flex().items_center().justify_center().rounded(8)
+          .text_color(t.dim).hover((s) => s.bg(t.raised).text_color(t.foreground))
+          .on_click((_e, cx) => { cx.stop_propagation(); this.save((bb) => { bb.labels = boardLabels(bb).filter((x) => x.id !== l.id); }); cx.notify(); })
+          .child("×")));
+    };
+    return h_flex().gap(6).items_center().flex_wrap()
+      .child(div().w(46).flex_none().text_size(11.5).text_color(t.dim).child("Labels"))
+      .children(all.map(chip))
+      .child(this.addingLabel
+        ? div().w(130).child(Input.new(this.newLabel).h(24).px(8).rounded(12).border_1().border_color(t.accent).bg(t.background).text_size(11.5).text_color(t.foreground))
+        : h_flex().id("lb-new").h(24).px(9).items_center().rounded(12).text_size(11.5).border_1().border_color(t.border)
+          .text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, cx) => { this.addingLabel = true; this.newLabel.set_value(""); this.newLabel.focus(); cx.notify(); })
+          .child("+ Label"));
   }
 
   editTask(task) {
@@ -316,6 +380,7 @@ export default class Kanban extends View {
             .border_1().border_color(c.id === col.id ? t.accent : t.border).bg(c.id === col.id ? t.selected : t.background)
             .text_color(c.id === col.id ? t.foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
             .on_click((_e, cx) => { if (c.id !== col.id) this.move(card.id, c.id); cx.notify(); }).child(c.name))))
+        .child(this.renderLabels(t, card))
         .child(this.renderDue(t, card, col))
         .child(this.renderLink(t, card)))
       .on_mouse_up("left", (_e, cx) => { if (this.taskDrag) { this.taskDrag = null; this.taskOver = null; cx.notify(); } })
@@ -423,6 +488,12 @@ export default class Kanban extends View {
     });
   }
 
+  /** Whether a card passes the board's filters (the label filter). */
+  visible(card, b) {
+    if (this.labelFilter && !(card.labels ?? []).includes(this.labelFilter)) return false;
+    return true;
+  }
+
   // Dragging a card (drag.card) or a column (drag.column, by its ⠿ grip).
   drop(column, before, cx) {
     const d = this.drag; this.drag = null; this.over = null;
@@ -459,6 +530,10 @@ export default class Kanban extends View {
           this.drag = null; this.over = null;
           openOverlay({ mod: "kanban", kind: "dialog", width: 540, height: 660, props: { board: this.boardName, open: c.id } });
           cx.notify();
+        })
+        .when((c.labels ?? []).length > 0, (el) => {
+          const byId = new Map(boardLabels(b).map((l) => [l.id, l]));
+          return el.child(h_flex().gap(4).flex_wrap().children(c.labels.map((id) => byId.get(id)).filter(Boolean).map((l) => pill(t, l))));
         })
         .child(div().text_size(12.8).text_color(t.foreground).child(c.title))
         .when(Boolean(c.description), (el) => {
@@ -514,7 +589,7 @@ export default class Kanban extends View {
             .when(ci < b.columns.length - 1, (el) => el.child(icon(`cr-${col.id}`, "›", () => this.moveColumn(col.id, null, 1))))
             .when(!col.cards.length && b.columns.length > 1, (el) => el.child(icon(`xc-${col.id}`, "×", () => this.removeColumn(col.id)))))
         .child(v_flex().id(`cards-${col.id}`).gap(6)
-          .children(col.cards.map((c) => card(col, c, ci))))
+          .children(col.cards.filter((c) => this.visible(c, b)).map((c) => card(col, c, ci))))
         .child(adding ? v_flex().gap(4).child(field()).child(div().px(2).text_size(11).text_color(t.dim).child("Enter adds · Esc stops"))
           : h_flex().id(`add-${col.id}`).h(28).px(6).rounded(7).items_center().text_size(12).text_color(t.dim)
             .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
@@ -523,13 +598,27 @@ export default class Kanban extends View {
     };
 
     const total = b.columns.reduce((n, c) => n + c.cards.length, 0);
+    const shown = b.columns.reduce((n, c) => n + c.cards.filter((x) => this.visible(x, b)).length, 0);
+    // The label filter: one label at a time, click again to show everything.
+    const usedLabels = new Set(b.columns.flatMap((c) => c.cards.flatMap((x) => x.labels ?? [])));
+    if (this.labelFilter && !usedLabels.has(this.labelFilter)) this.labelFilter = null;
+    const filterBar = h_flex().gap(4).items_center().children(boardLabels(b).filter((l) => usedLabels.has(l.id)).map((l) => {
+      const c = t[l.color] ?? t.muted, on = this.labelFilter === l.id;
+      return h_flex().id(`flt-${l.id}`).h(24).px(8).gap(5).items_center().rounded(12).text_size(11.5)
+        .border_1().border_color(on ? c : t.border).bg(on ? tint(c, "33") : t.background).text_color(on ? c : t.muted)
+        .cursor_pointer().hover((s) => s.bg(on ? tint(c, "4d") : t.hover))
+        .on_click((_e, cx) => { this.labelFilter = on ? null : l.id; cx.notify(); })
+        .child(div().size(7).rounded(4).bg(c)).child(l.name);
+    }));
     return v_flex().id("kanban").track_focus(this.handle).size_full().bg(t.background).text_color(t.foreground)
       .on_key_down((e, cx) => { if (e.key === "escape" && this.edit) { this.edit = null; this.handle.focus(); cx.notify(); } })
       .on_mouse_up("left", (_e, cx) => { if (this.drag) { this.drag = null; this.over = null; cx.notify(); } })
       .child(h_flex().h(44).flex_none().px(16).gap(10).items_center().border_b(1).border_color(t.border)
         .child(svg_icon(t))
         .child(div().text_size(14).font_semibold().child("Kanban"))
-        .child(div().text_size(12).text_color(t.dim).child(`${total} card${total === 1 ? "" : "s"}`))
+        .child(div().text_size(12).text_color(t.dim).child(shown === total ? `${total} card${total === 1 ? "" : "s"}` : `${shown} of ${total} cards`))
+        .child(div().w(8))
+        .child(filterBar)
         .child(div().flex_1())
         .when(Boolean(this.drag), (el) => el.child(div().text_size(12).text_color(t.muted).child(this.drag?.column ? "Release over another column to put this one there" : "Release over a column or card to move")))
         .child(this.edit?.kind === "new-column" ? div().w(200).child(field())
