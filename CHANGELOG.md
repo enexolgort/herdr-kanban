@@ -22,6 +22,11 @@ All notable changes to the Kanban mod. Dates are when the change was made.
   (`ansi5`) stripe down their left edge and a "▲ High" badge, low ones a grey stripe and "▼
   Low". In each column, high cards show first and low cards last. Within a priority, cards keep
   the order you put them in.
+- **Keyboard.** Click the board (or reach it with `pane.go`: the mod is now `focusable`), then:
+  arrows or h j k l select a card (2 px accent border), Enter opens it, Shift + ← → moves it to
+  the next column, Shift + ↑ ↓ moves it up or down (within its priority), n adds a card to the
+  selected card's column, / jumps to search, x or Delete deletes it, and Esc clears the
+  selection, the search or an input. `?` (or the ? button in the header) shows the keys.
 
 ### Changed
 

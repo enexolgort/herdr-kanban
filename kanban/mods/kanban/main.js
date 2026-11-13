@@ -14,7 +14,7 @@
 // Enter adds the next, drag the ⠿ grip or ↑ ↓ to reorder).
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, CalendarState } from "gpui-base";
-import { theme, props, shared, setShared, openOverlay, closeOverlay, spaces, panes, run } from "herdr";
+import { theme, props, shared, setShared, openOverlay, closeOverlay, spaces, panes, run, nextCommand } from "herdr";
 
 const DEFAULT = {
   columns: [
@@ -127,6 +127,16 @@ export default class Kanban extends View {
     this.search.on("change", (_e, cx) => { this.query = this.search.value(); cx.notify(); });
     this.search.on("focus", (_e, cx) => { this.searching = true; cx.notify(); });
     this.search.on("blur", (_e, cx) => { this.searching = false; cx.notify(); });
+    // Keyboard: the board takes the keys once clicked, or when pane.go lands on it (mod.json focusable).
+    this.sel = null;
+    this.showKeys = false;
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c === "focus") this.handle.focus();
+        cx.notify();
+      }
+    });
   }
 
   /** Everything a search looks in, lowercased. */
@@ -538,6 +548,81 @@ export default class Kanban extends View {
     return true;
   }
 
+  /** A column's cards as shown: filtered, high priority first, low last, otherwise in order. */
+  shownCards(col, b) {
+    return col.cards.filter((c) => this.visible(c, b)).sort((x, y) => rank(x) - rank(y));
+  }
+
+  // ---- Keyboard (board) ----
+  //   ← → ↑ ↓ or h j k l   select a card          Enter   open it
+  //   Shift + ← →          move it to a column    Shift + ↑ ↓   move it up or down
+  //   n   new card in the selected card's column   /   search      x or Delete   delete it
+  //   ?   show these keys                          Esc   clear the selection
+
+  key(e, cx) {
+    const k = e.key, shift = e.modifiers?.shift;
+    if (k === "escape") {
+      if (this.edit) { this.edit = null; this.handle.focus(); }
+      else if (this.searching) { this.search.set_value(""); this.query = ""; this.handle.focus(); }
+      else if (this.showKeys) this.showKeys = false;
+      else this.sel = null;
+      return cx.notify();
+    }
+    // Typing in an input is not a command.
+    if (this.edit || this.searching || e.modifiers?.control || e.modifiers?.alt || e.modifiers?.platform) return;
+    const b = this.board();
+    const cols = b.columns.map((col) => ({ col, cards: this.shownCards(col, b) }));
+    let ci = cols.findIndex((x) => x.cards.some((c) => c.id === this.sel));
+    let ri = ci >= 0 ? cols[ci].cards.findIndex((c) => c.id === this.sel) : -1;
+    const select = (c, r) => { const card = cols[c]?.cards[r]; if (card) this.sel = card.id; };
+    const dir = { left: "left", h: "left", right: "right", l: "right", up: "up", k: "up", down: "down", j: "down" }[k.toLowerCase()];
+    if (dir) {
+      cx.stop_propagation();
+      if (ci < 0) { const first = cols.findIndex((x) => x.cards.length); if (first >= 0) select(first, 0); return cx.notify(); }
+      if (shift && (dir === "left" || dir === "right")) this.shift(this.sel, cols[ci].col.id, dir === "left" ? -1 : 1);
+      else if (shift) this.nudge(this.sel, cols[ci], dir === "up" ? -1 : 1);
+      else if (dir === "up" || dir === "down") select(ci, Math.max(0, Math.min(cols[ci].cards.length - 1, ri + (dir === "up" ? -1 : 1))));
+      else {
+        // The nearest column that way with cards; the same row, or its last card.
+        for (let c = ci + (dir === "left" ? -1 : 1); c >= 0 && c < cols.length; c += dir === "left" ? -1 : 1) {
+          if (cols[c].cards.length) { select(c, Math.min(ri, cols[c].cards.length - 1)); break; }
+        }
+      }
+      return cx.notify();
+    }
+    if (k === "enter" && this.sel) { cx.stop_propagation(); this.openCard(this.sel); return; }
+    if (k === "n") {
+      cx.stop_propagation();
+      const col = ci >= 0 ? cols[ci].col : b.columns[0];
+      if (col) this.start({ kind: "add", column: col.id }, "", "Card title");
+      return cx.notify();
+    }
+    if (k === "/" || e.key_char === "/") { cx.stop_propagation(); this.search.focus(); return cx.notify(); }
+    if ((k === "x" || k === "delete") && ci >= 0) {
+      cx.stop_propagation();
+      const next = cols[ci].cards[ri + 1] ?? cols[ci].cards[ri - 1];
+      this.remove(this.sel, cols[ci].col.id);
+      this.sel = next?.id ?? null;
+      return cx.notify();
+    }
+    if (e.key_char === "?") { this.showKeys = !this.showKeys; return cx.notify(); }
+  }
+
+  /** Moves a card up or down past its neighbour as shown (same column). */
+  nudge(cardId, shown, step) {
+    const at = shown.cards.findIndex((c) => c.id === cardId), other = shown.cards[at + step];
+    if (!other || rank(other) !== rank(shown.cards[at])) return; // priority order wins over position
+    this.save((b) => {
+      const col = b.columns.find((c) => c.id === shown.col.id);
+      const i = col.cards.findIndex((c) => c.id === cardId), j = col.cards.findIndex((c) => c.id === other.id);
+      [col.cards[i], col.cards[j]] = [col.cards[j], col.cards[i]];
+    });
+  }
+
+  openCard(id) {
+    openOverlay({ mod: "kanban", kind: "dialog", width: 540, height: 660, props: { board: this.boardName, open: id } });
+  }
+
   // Dragging a card (drag.card) or a column (drag.column, by its ⠿ grip).
   drop(column, before, cx) {
     const d = this.drag; this.drag = null; this.over = null;
@@ -566,14 +651,20 @@ export default class Kanban extends View {
       const u = urgency(c.due, col), hue = u?.color ? t[u.color] : null;
       const pr = PRIORITY[c.priority];
       return v_flex().id(`card-${c.id}`).relative().p(9).pl(pr ? 12 : 9).gap(4).rounded(8).border_1()
-        .border_color(dragging ? t.accent : hue ?? t.border).bg(hue ? tint(hue, "26") : t.raised).opacity(dragging ? 0.5 : 1)
+        .border_color(dragging || this.sel === c.id ? t.accent : hue ?? t.border).bg(hue ? tint(hue, "26") : t.raised).opacity(dragging ? 0.5 : 1)
+        .when(this.sel === c.id && !dragging, (el) => el.border_2().shadow_md())
         .cursor_pointer().hover((s) => s.border_color(hue ?? t.input))
-        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.drag = { card: c.id, from: col.id }; cx.notify(); })
+        .on_mouse_down("left", (_e, cx) => {
+          cx.stop_propagation();
+          this.drag = { card: c.id, from: col.id }; this.sel = c.id;
+          if (!this.edit && !this.searching) this.handle.focus();
+          cx.notify();
+        })
         .on_mouse_up("left", (_e, cx) => {
           cx.stop_propagation();
           if (this.drag && this.drag.card !== c.id) return this.drop(col.id, c.id, cx);
           this.drag = null; this.over = null;
-          openOverlay({ mod: "kanban", kind: "dialog", width: 540, height: 660, props: { board: this.boardName, open: c.id } });
+          this.openCard(c.id);
           cx.notify();
         })
         // Priority: a stripe down the left edge in its color.
@@ -638,8 +729,7 @@ export default class Kanban extends View {
             .when(ci < b.columns.length - 1, (el) => el.child(icon(`cr-${col.id}`, "›", () => this.moveColumn(col.id, null, 1))))
             .when(!col.cards.length && b.columns.length > 1, (el) => el.child(icon(`xc-${col.id}`, "×", () => this.removeColumn(col.id)))))
         .child(v_flex().id(`cards-${col.id}`).gap(6)
-          // High priority first, low last; otherwise the order you put them in (the sort is stable).
-          .children(col.cards.filter((c) => this.visible(c, b)).sort((x, y) => rank(x) - rank(y)).map((c) => card(col, c, ci))))
+          .children(this.shownCards(col, b).map((c) => card(col, c, ci))))
         .child(adding ? v_flex().gap(4).child(field()).child(div().px(2).text_size(11).text_color(t.dim).child("Enter adds · Esc stops"))
           : h_flex().id(`add-${col.id}`).h(28).px(6).rounded(7).items_center().text_size(12).text_color(t.dim)
             .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
@@ -661,11 +751,8 @@ export default class Kanban extends View {
         .child(div().size(7).rounded(4).bg(c)).child(l.name);
     }));
     return v_flex().id("kanban").track_focus(this.handle).size_full().bg(t.background).text_color(t.foreground)
-      .on_key_down((e, cx) => {
-        if (e.key !== "escape") return;
-        if (this.edit) { this.edit = null; this.handle.focus(); cx.notify(); }
-        else if (this.searching) { this.search.set_value(""); this.query = ""; this.handle.focus(); cx.notify(); }
-      })
+      .on_key_down((e, cx) => this.key(e, cx))
+      .on_mouse_down("left", () => { if (!this.edit && !this.searching) this.handle.focus(); })
       .on_mouse_up("left", (_e, cx) => { if (this.drag) { this.drag = null; this.over = null; cx.notify(); } })
       .child(h_flex().h(44).flex_none().px(16).gap(10).items_center().border_b(1).border_color(t.border)
         .child(svg_icon(t))
@@ -685,7 +772,16 @@ export default class Kanban extends View {
           : h_flex().id("new-column").flex_none().h(28).px(10).rounded(7).items_center().text_size(12).text_color(t.muted)
             .border_1().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_click((_e, cx) => { this.start({ kind: "new-column" }, "", "Column name"); cx.notify(); })
-            .child("+ Column")))
+            .child("+ Column"))
+        .child(h_flex().id("keys-help").flex_none().w(28).h(28).justify_center().items_center().rounded(7).text_size(12.5)
+          .border_1().border_color(this.showKeys ? t.accent : t.border).text_color(this.showKeys ? t.foreground : t.muted)
+          .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.showKeys = !this.showKeys; cx.notify(); })
+          .child("?")))
+      .when(this.showKeys, (el) => el.child(h_flex().flex_none().px(16).py(8).gap(18).flex_wrap().border_b(1).border_color(t.border)
+        .bg(t.surface).text_size(11.5).text_color(t.muted)
+        .children([["← → ↑ ↓  h j k l", "select"], ["Enter", "open"], ["Shift ← →", "move to column"], ["Shift ↑ ↓", "move up/down"],
+          ["n", "new card"], ["/", "search"], ["x  Del", "delete"], ["Esc", "clear"]]
+          .map(([keys, what]) => h_flex().gap(6).child(div().px(5).rounded(4).bg(t.hover).text_color(t.foreground).child(keys)).child(what)))))
       // The board scrolls as a whole: down when a column runs long, sideways when columns don't fit.
       .child(div().id("board").flex_1().min_h(0).overflow_y_scrollbar()
         .child(h_flex().id("columns").p(14).gap(12).items_start().overflow_x_scrollbar()
