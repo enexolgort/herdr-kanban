@@ -64,6 +64,13 @@ function pill(t, label, size = 10.5) {
   return div().px(6).rounded(5).text_size(size).bg(tint(c, "33")).text_color(c).child(label.name);
 }
 
+// ---- Priority: "high", "low", or none (normal). High cards show first in their column ----
+const PRIORITY = {
+  high: { label: "High", mark: "▲", color: "ansi5", rank: 0 },
+  low: { label: "Low", mark: "▼", color: "dim", rank: 2 },
+};
+const rank = (card) => PRIORITY[card.priority]?.rank ?? 1;
+
 // ---- Linked tabs: a card can point at a tab and show its agents' status ----
 const STATUS_LABEL = { working: "working", blocked: "needs you", done: "done", idle: "idle" };
 
@@ -293,6 +300,23 @@ export default class Kanban extends View {
             .when(Boolean(x.status), (el) => el.child(div().text_size(11).text_color(t.dim).child(STATUS_LABEL[x.status]))))))));
   }
 
+  // The Priority row: Low, Normal, High.
+  renderPriority(t, card) {
+    const chip = (value, label, color) => {
+      const on = (card.priority ?? null) === value, c = color ? t[color] : t.foreground;
+      return h_flex().id(`pr-${value ?? "normal"}`).h(24).px(9).gap(5).items_center().rounded(12).text_size(11.5)
+        .border_1().border_color(on ? (color ? c : t.accent) : t.border).bg(on ? (color ? tint(c, "33") : t.selected) : t.background)
+        .text_color(on ? c : t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { this.updateCard((x) => { if (value) x.priority = value; else delete x.priority; }); cx.notify(); })
+        .child(label);
+    };
+    return h_flex().gap(6).items_center()
+      .child(div().w(46).flex_none().text_size(11.5).text_color(t.dim).child("Priority"))
+      .child(chip("low", "▼ Low", PRIORITY.low.color))
+      .child(chip(null, "Normal", null))
+      .child(chip("high", "▲ High", PRIORITY.high.color));
+  }
+
   // The Labels row: click a label to put it on the card or take it off; "+ Label" makes one.
   // A label no card uses has a × to delete it from the board.
   renderLabels(t, card) {
@@ -397,6 +421,7 @@ export default class Kanban extends View {
             .border_1().border_color(c.id === col.id ? t.accent : t.border).bg(c.id === col.id ? t.selected : t.background)
             .text_color(c.id === col.id ? t.foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
             .on_click((_e, cx) => { if (c.id !== col.id) this.move(card.id, c.id); cx.notify(); }).child(c.name))))
+        .child(this.renderPriority(t, card))
         .child(this.renderLabels(t, card))
         .child(this.renderDue(t, card, col))
         .child(this.renderLink(t, card)))
@@ -539,7 +564,8 @@ export default class Kanban extends View {
       const dragging = this.drag?.card === c.id;
       // Due soon or overdue: the card takes that color (border, tinted background, date badge).
       const u = urgency(c.due, col), hue = u?.color ? t[u.color] : null;
-      return v_flex().id(`card-${c.id}`).p(9).gap(4).rounded(8).border_1()
+      const pr = PRIORITY[c.priority];
+      return v_flex().id(`card-${c.id}`).relative().p(9).pl(pr ? 12 : 9).gap(4).rounded(8).border_1()
         .border_color(dragging ? t.accent : hue ?? t.border).bg(hue ? tint(hue, "26") : t.raised).opacity(dragging ? 0.5 : 1)
         .cursor_pointer().hover((s) => s.border_color(hue ?? t.input))
         .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.drag = { card: c.id, from: col.id }; cx.notify(); })
@@ -550,6 +576,8 @@ export default class Kanban extends View {
           openOverlay({ mod: "kanban", kind: "dialog", width: 540, height: 660, props: { board: this.boardName, open: c.id } });
           cx.notify();
         })
+        // Priority: a stripe down the left edge in its color.
+        .when(Boolean(pr), (el) => el.child(div().absolute().left(0).top(0).bottom(0).w(4).rounded_tl(8).rounded_bl(8).bg(t[pr.color])))
         .when((c.labels ?? []).length > 0, (el) => {
           const byId = new Map(boardLabels(b).map((l) => [l.id, l]));
           return el.child(h_flex().gap(4).flex_wrap().children(c.labels.map((id) => byId.get(id)).filter(Boolean).map((l) => pill(t, l))));
@@ -572,6 +600,8 @@ export default class Kanban extends View {
             .when(Boolean(st), (e2) => e2.child(div().text_color(t[st]).child(STATUS_LABEL[st]))));
         })
         .child(h_flex().gap(4).items_center()
+          .when(Boolean(pr), (el) => el.child(div().px(6).rounded(6).text_size(11).bg(tint(t[pr.color], "33")).text_color(t[pr.color])
+            .child(`${pr.mark} ${pr.label}`)))
           .when(Boolean(u), (el) => el.child(div().px(6).rounded(6).text_size(11)
             .bg(hue ? tint(hue, "40") : t.hover).text_color(hue ? t.foreground : t.muted).child(`📅 ${u.label.replace(/^Due (?=\d)/, "")}`)))
           .when((c.tasks ?? []).length > 0, (el) => {
@@ -608,7 +638,8 @@ export default class Kanban extends View {
             .when(ci < b.columns.length - 1, (el) => el.child(icon(`cr-${col.id}`, "›", () => this.moveColumn(col.id, null, 1))))
             .when(!col.cards.length && b.columns.length > 1, (el) => el.child(icon(`xc-${col.id}`, "×", () => this.removeColumn(col.id)))))
         .child(v_flex().id(`cards-${col.id}`).gap(6)
-          .children(col.cards.filter((c) => this.visible(c, b)).map((c) => card(col, c, ci))))
+          // High priority first, low last; otherwise the order you put them in (the sort is stable).
+          .children(col.cards.filter((c) => this.visible(c, b)).sort((x, y) => rank(x) - rank(y)).map((c) => card(col, c, ci))))
         .child(adding ? v_flex().gap(4).child(field()).child(div().px(2).text_size(11).text_color(t.dim).child("Enter adds · Esc stops"))
           : h_flex().id(`add-${col.id}`).h(28).px(6).rounded(7).items_center().text_size(12).text_color(t.dim)
             .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))

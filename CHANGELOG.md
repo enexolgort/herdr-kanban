@@ -18,6 +18,10 @@ All notable changes to the Kanban mod. Dates are when the change was made.
 - **Search.** A box in the header that keeps only the cards matching every word typed. It
   looks in the title, description, tasks, labels and linked tab name. It combines with the
   label filter. × or Esc clears it.
+- **Priority.** Low, Normal or High in an open card's Priority row. High cards get a magenta
+  (`ansi5`) stripe down their left edge and a "▲ High" badge, low ones a grey stripe and "▼
+  Low". In each column, high cards show first and low cards last. Within a priority, cards keep
+  the order you put them in.
 
 ### Changed
 
