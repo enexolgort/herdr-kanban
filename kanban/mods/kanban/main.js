@@ -1,0 +1,471 @@
+// Kanban: a board of columns and cards, opened as its own tab
+// (tab.new {name: "Kanban", mod: "kanban"}). The board lives in shared state
+// (`kanban.board.<name>`, saved in shared.json), so every open copy shows the same
+// cards and they survive restarts. props {board: "name"} opens another board.
+//
+// Cards: "+ Add card" under a column (Enter adds, Esc stops), click a card to open it,
+// drag it (press, release over a column or a card) or use ‹ › to move it, × deletes.
+// Columns: "+ Column" adds one, click a title to rename it, drag the ⠿ grip or use its ‹ › to
+// reorder them, × removes an empty one. Cards with a due date take a color: red overdue,
+// yellow today or tomorrow, blue within a week (not in a Done or Archive column).
+//
+// An open card is this same mod as a dialog, props {board, open: <card id>}: its title,
+// its column, its due date, a description, and a task list (tick, click to edit, × to remove,
+// Enter adds the next, drag the ⠿ grip or ↑ ↓ to reorder).
+import { View, div, svg } from "gpui-kit";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, CalendarState } from "gpui-base";
+import { theme, props, shared, setShared, openOverlay, closeOverlay } from "herdr";
+
+const DEFAULT = {
+  columns: [
+    { id: "todo", name: "To do", cards: [] },
+    { id: "doing", name: "Doing", cards: [] },
+    { id: "done", name: "Done", cards: [] },
+  ],
+};
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+// ---- Due dates: "YYYY-MM-DD", this computer's local day ----
+const DAY = 86400000;
+const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const today = () => iso(new Date());
+const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return iso(d); };
+const daysLeft = (due) => Math.round((Date.parse(`${due}T00:00:00Z`) - Date.parse(`${today()}T00:00:00Z`)) / DAY);
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const short = (due) => `${Number(due.slice(8))} ${MONTHS[Number(due.slice(5, 7)) - 1]}`;
+// Columns whose cards are finished: their due dates no longer warn.
+const finished = (col) => /^(done|archive|archived)$/i.test(col.name.trim());
+
+/** How urgent a due date is: { color (theme name, null for calm), label }. */
+function urgency(due, col) {
+  if (!due) return null;
+  const n = daysLeft(due);
+  if (finished(col)) return { color: null, label: short(due) };
+  if (n < 0) return { color: "ansi1", label: n === -1 ? "Overdue · yesterday" : `Overdue · ${-n} days` };
+  if (n === 0) return { color: "ansi3", label: "Due today" };
+  if (n === 1) return { color: "ansi3", label: "Due tomorrow" };
+  if (n <= 7) return { color: "ansi4", label: `Due ${short(due)} · ${n} days` };
+  return { color: null, label: `Due ${short(due)}` };
+}
+
+/** A theme color with an alpha, for tinted card backgrounds. */
+function tint(color, alpha) {
+  return /^#[0-9a-f]{6}$/i.test(color ?? "") ? color + alpha : color;
+}
+
+export default class Kanban extends View {
+  init(_props, cx) {
+    this.boardName = props()?.board ?? "main";
+    this.key = `kanban.board.${this.boardName}`;
+    this.edit = null; // { kind: "add" | "card" | "column" | "new-column", column, card }
+    this.drag = null; // { card, from }
+    this.over = null; // column id under a drag
+    this.input = null;
+    this.handle = cx.focus_handle();
+    if (!shared(this.key)) setShared(this.key, DEFAULT);
+    this.open = props()?.open ?? null;
+    if (this.open) this.initDetail();
+    // Due colors move at midnight: look again every 10 minutes.
+    else cx.timer.every(600000, (cx) => { if (this.day !== today()) cx.notify(); });
+  }
+
+  // ---- An open card (dialog) ----
+
+  initDetail() {
+    const found = this.find(this.open);
+    this.title = InputState.new({ placeholder: "Card title", value: found?.card.title ?? "" });
+    const saveTitle = () => {
+      const text = this.title.value().trim();
+      if (text) this.updateCard((c) => { c.title = text; });
+    };
+    this.title.on("submit", () => { saveTitle(); this.task.focus(); });
+    this.title.on("blur", () => saveTitle());
+    this.task = InputState.new({ placeholder: "Add a task, Enter to add" });
+    this.task.on("submit", (_e, cx) => {
+      const text = this.task.value().trim();
+      if (text) this.updateCard((c) => { (c.tasks ??= []).push({ id: uid(), text, done: false }); });
+      this.task.set_value("");
+      cx.notify();
+    });
+    this.taskEdit = null; // { id, input }
+    this.taskDrag = null; this.taskOver = null;
+    // The description saves as it's typed (an empty one is removed).
+    this.desc = TextareaState.new({ placeholder: "Add a description…", value: found?.card.description ?? "" });
+    this.desc.set_auto_grow(3, 12);
+    this.desc.on("change", () => {
+      const text = this.desc.value().replace(/\s+$/, "");
+      this.updateCard((c) => { if (text) c.description = text; else delete c.description; });
+    });
+    this.picking = false;
+    this.calendar = CalendarState.new();
+    if (found?.card.due) this.calendar.set_value(found.card.due);
+    this.calendar.on("change", (date, cx) => {
+      if (typeof date === "string") this.setDue(date);
+      this.picking = false;
+      cx.notify();
+    });
+    if (!(found?.card.tasks ?? []).length) this.task.focus();
+  }
+
+  find(cardId) {
+    for (const col of this.board().columns) {
+      const card = col.cards.find((c) => c.id === cardId);
+      if (card) return { col, card };
+    }
+    return null;
+  }
+
+  updateCard(fn) {
+    this.save((b) => {
+      for (const col of b.columns) { const c = col.cards.find((x) => x.id === this.open); if (c) fn(c, col, b); }
+    });
+  }
+
+  // A task takes the place of task `to`, or moves `step` places.
+  moveTask(id, to, step) {
+    this.updateCard((c) => {
+      const list = c.tasks ?? [];
+      const from = list.findIndex((x) => x.id === id);
+      const at = to ? list.findIndex((x) => x.id === to) : from + step;
+      if (from < 0 || at < 0 || at >= list.length || at === from) return;
+      list.splice(at, 0, list.splice(from, 1)[0]);
+    });
+  }
+
+  setDue(due) {
+    this.updateCard((c) => { if (due) c.due = due; else delete c.due; });
+  }
+
+  // The Due row: quick picks, a month grid behind "Pick…", and how urgent it is now.
+  renderDue(t, card, col) {
+    const u = urgency(card.due, col);
+    const chip = (id, label, on, action) => h_flex().id(id).h(24).px(9).items_center().rounded(12).text_size(11.5)
+      .border_1().border_color(on ? t.accent : t.border).bg(on ? t.selected : t.background)
+      .text_color(on ? t.foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { action(); cx.notify(); }).child(label);
+    const row = h_flex().gap(6).items_center().flex_wrap()
+      .child(div().w(34).text_size(11.5).text_color(t.dim).child("Due"))
+      .child(chip("due-today", "Today", card.due === today(), () => this.setDue(today())))
+      .child(chip("due-tomorrow", "Tomorrow", card.due === plus(1), () => this.setDue(plus(1))))
+      .child(chip("due-week", "In a week", card.due === plus(7), () => this.setDue(plus(7))))
+      .child(chip("due-pick", card.due && ![today(), plus(1), plus(7)].includes(card.due) ? short(card.due) : "Pick…", this.picking, () => { this.picking = !this.picking; }))
+      .when(Boolean(card.due), (el) => el
+        .child(div().text_size(11.5).text_color(u?.color ? t[u.color] : t.muted).child(u?.label ?? ""))
+        .child(chip("due-clear", "Clear", false, () => { this.setDue(null); this.picking = false; })));
+    if (!this.picking) return row;
+
+    const c = this.calendar, month = c.month_days()[0];
+    const nav = (id, label, action) => div().id(id).w(24).h(24).flex().items_center().justify_center().rounded(5)
+      .text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_click((_e, cx) => { action(); cx.notify(); }).child(label);
+    const inMonth = (day) => Number(day.slice(5, 7)) === c.month();
+    const grid = v_flex().w(252).p(8).gap(2).rounded(8).border_1().border_color(t.border).bg(t.background)
+      .child(h_flex().items_center().pb(4)
+        .child(nav("cal-prev", "‹", () => c.prev_month()))
+        .child(div().flex_1().text_center().text_size(12).font_semibold().child(`${MONTHS[c.month() - 1]} ${c.year()}`))
+        .child(nav("cal-next", "›", () => c.next_month())))
+      .child(h_flex().children(["M", "T", "W", "T", "F", "S", "S"].map((d) => div().w(33).text_center().text_size(10.5).text_color(t.dim).child(d))))
+      .children(month.map((week, wi) => h_flex().children(week.map((day) => {
+        const on = day === card.due, now = day === today();
+        return div().id(`d-${wi}-${day}`).w(33).h(26).flex().items_center().justify_center().rounded(5).text_size(11.5)
+          .bg(on ? t.accent : t.background).text_color(on ? t.accent_foreground : inMonth(day) ? t.foreground : t.dim)
+          .when(now && !on, (el) => el.border_1().border_color(t.accent))
+          .cursor_pointer().hover((s) => s.bg(on ? t.accent : t.hover))
+          .on_click((_e, cx) => { this.setDue(day); this.picking = false; cx.notify(); })
+          .child(String(Number(day.slice(8))));
+      }))));
+    return v_flex().gap(8).child(row).child(grid);
+  }
+
+  editTask(task) {
+    const input = InputState.new({ value: task.text });
+    input.set_selected_range({ start: 0, end: task.text.length });
+    const done = (cx) => {
+      if (this.taskEdit?.input !== input) return;
+      const text = input.value().trim();
+      this.updateCard((c) => {
+        c.tasks = (c.tasks ?? []).flatMap((x) => x.id !== task.id ? [x] : text ? [{ ...x, text }] : []);
+      });
+      this.taskEdit = null;
+      cx.notify();
+    };
+    input.on("submit", (_e, cx) => done(cx));
+    input.on("blur", (_e, cx) => done(cx));
+    this.taskEdit = { id: task.id, input };
+    input.focus();
+  }
+
+  renderDetail(t) {
+    const found = this.find(this.open);
+    const close = () => closeOverlay(props().overlay);
+    if (!found) {
+      return v_flex().id("detail").size_full().p(20).gap(12).bg(t.popover).text_color(t.muted).text_size(13)
+        .child("This card was deleted.").child(div().id("gone-close").cursor_pointer().text_color(t.accent).on_click(close).child("Close"));
+    }
+    const { col, card } = found;
+    const tasks = card.tasks ?? [];
+    const doneCount = tasks.filter((x) => x.done).length;
+    const button = (id, label, action, danger) => h_flex().id(id).h(30).px(12).items_center().rounded(7).text_size(12.5)
+      .border_1().border_color(t.input).bg(t.raised).text_color(danger ? t.blocked : t.foreground).cursor_pointer()
+      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { action(); cx.notify(); }).child(label);
+    const check = (x) => div().id(`chk-${x.id}`).size(16).flex_none().rounded(4).border_1()
+      .border_color(x.done ? t.accent : t.input).bg(x.done ? t.accent : t.background)
+      .flex().items_center().justify_center().text_size(11).text_color(t.accent_foreground).cursor_pointer()
+      .on_click((_e, cx) => { this.updateCard((c) => { const y = c.tasks.find((z) => z.id === x.id); if (y) y.done = !y.done; }); cx.notify(); })
+      .child(x.done ? "✓" : "");
+    // Reorder: drag a task by its ⠿ grip onto another (it takes that place), or ↑ ↓.
+    const small = (id, label, action) => div().id(id).w(20).h(20).flex().items_center().justify_center().rounded(4)
+      .text_size(12).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.raised).text_color(t.foreground))
+      .on_click((_e, cx) => { action(); cx.notify(); }).child(label);
+    const dragged = this.taskDrag;
+    const row = (x, i) => h_flex().id(`task-${x.id}`).min_h(30).px(2).gap(7).items_center().rounded(6)
+      .border_1().border_color(dragged && this.taskOver === x.id && dragged !== x.id ? t.accent : t.popover)
+      .opacity(dragged === x.id ? 0.5 : 1).hover((s) => s.bg(t.hover))
+      .on_hover((h, cx) => { if (this.taskDrag) { if (h) this.taskOver = x.id; else if (this.taskOver === x.id) this.taskOver = null; cx.notify(); } })
+      .on_mouse_up("left", (_e, cx) => { if (this.taskDrag) { this.moveTask(this.taskDrag, x.id); this.taskDrag = null; this.taskOver = null; cx.notify(); } })
+      .child(div().id(`tgrip-${x.id}`).w(14).h(22).flex().items_center().justify_center().rounded(4)
+        .text_size(11).text_color(t.dim).cursor_grab().hover((s) => s.text_color(t.foreground))
+        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.taskDrag = x.id; this.taskOver = x.id; cx.notify(); })
+        .child("⠿"))
+      .child(check(x))
+      .child(this.taskEdit?.id === x.id
+        ? div().flex_1().child(Input.new(this.taskEdit.input).h(26).px(6).rounded(5).border_1().border_color(t.accent).bg(t.background).text_size(12.8).text_color(t.foreground))
+        : div().id(`txt-${x.id}`).flex_1().min_w(0).text_size(12.8).cursor_pointer()
+          .text_color(x.done ? t.dim : t.foreground).when(x.done, (el) => el.line_through())
+          .on_click((_e, cx) => { this.editTask(x); cx.notify(); }).child(x.text))
+      .when(i > 0, (el) => el.child(small(`tup-${x.id}`, "↑", () => this.moveTask(x.id, null, -1))))
+      .when(i < tasks.length - 1, (el) => el.child(small(`tdn-${x.id}`, "↓", () => this.moveTask(x.id, null, 1))))
+      .child(div().id(`del-${x.id}`).w(20).h(20).flex().items_center().justify_center().rounded(4).text_color(t.dim).cursor_pointer()
+        .hover((s) => s.bg(t.raised).text_color(t.foreground))
+        .on_click((_e, cx) => { this.updateCard((c) => { c.tasks = c.tasks.filter((z) => z.id !== x.id); }); cx.notify(); }).child("×"));
+
+    return v_flex().id("detail").size_full().bg(t.popover).text_color(t.foreground)
+      .child(v_flex().p(18).pb(12).gap(10).border_b(1).border_color(t.border)
+        .child(h_flex().items_center().gap(8)
+          .child(div().flex_1().text_size(11.5).text_color(t.dim).child("Card"))
+          .child(div().text_size(11).text_color(t.dim).child("Esc")))
+        .child(Input.new(this.title).h(36).px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(15).font_semibold().text_color(t.foreground))
+        .child(h_flex().gap(6).items_center().flex_wrap()
+          .children(this.board().columns.map((c) => h_flex().id(`mv-${c.id}`).h(24).px(9).items_center().rounded(12).text_size(11.5)
+            .border_1().border_color(c.id === col.id ? t.accent : t.border).bg(c.id === col.id ? t.selected : t.background)
+            .text_color(c.id === col.id ? t.foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => { if (c.id !== col.id) this.move(card.id, c.id); cx.notify(); }).child(c.name))))
+        .child(this.renderDue(t, card, col)))
+      .on_mouse_up("left", (_e, cx) => { if (this.taskDrag) { this.taskDrag = null; this.taskOver = null; cx.notify(); } })
+      .child(v_flex().id("tasks").flex_1().min_h(0).p(14).gap(4).overflow_y_scrollbar()
+        .child(div().px(6).pb(6).text_size(12.5).font_semibold().child("Description"))
+        .child(div().px(2).pb(14).child(Textarea.new(this.desc).w_full().px(8).py(6).rounded(7).border_1().border_color(t.input)
+          .bg(t.background).text_size(12.8).text_color(t.foreground)))
+        .child(h_flex().px(6).pb(6).gap(10).items_center()
+          .child(div().text_size(12.5).font_semibold().child("Tasks"))
+          .child(div().text_size(11.5).text_color(t.dim).child(tasks.length ? `${doneCount}/${tasks.length}` : ""))
+          .when(tasks.length > 0, (el) => el.child(div().w(160).h(4).rounded(2).bg(t.hover)
+            .child(div().h(4).rounded(2).bg(t.accent).w(Math.round(160 * doneCount / tasks.length))))))
+        .children(tasks.map((x, i) => row(x, i)))
+        .child(div().pt(6).child(Input.new(this.task).h(32).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(12.8).text_color(t.foreground))))
+      .child(h_flex().p(14).gap(8).border_t(1).border_color(t.border)
+        .child(button("delete-card", "Delete card", () => { this.save((b) => { for (const c of b.columns) c.cards = c.cards.filter((x) => x.id !== card.id); }); close(); }, true))
+        .child(div().flex_1())
+        .child(button("close-card", "Close", close)));
+  }
+
+  board() {
+    const b = shared(this.key);
+    return b?.columns ? b : DEFAULT;
+  }
+
+  save(fn) {
+    const b = JSON.parse(JSON.stringify(this.board()));
+    fn(b);
+    setShared(this.key, b);
+  }
+
+  // One input at a time: adding a card, editing one, renaming or adding a column.
+  start(edit, value, placeholder) {
+    this.edit = edit;
+    const input = InputState.new({ placeholder, value });
+    this.input = input;
+    if (value) input.set_selected_range({ start: 0, end: value.length });
+    input.on("submit", (_e, cx) => {
+      if (this.input !== input) return;
+      const keep = this.edit?.kind === "add" ? this.edit : null;
+      this.commit();
+      if (keep) this.start(keep, "", placeholder); // adding stays open for the next card
+      cx.notify();
+    });
+    input.on("blur", (_e, cx) => {
+      if (this.input !== input || !this.edit) return;
+      // Leaving an edit or a rename saves it; leaving an add closes it (keeping typed text).
+      if (this.edit.kind === "card" || this.edit.kind === "column" || input.value().trim()) this.commit();
+      else this.edit = null;
+      cx.notify();
+    });
+    input.focus();
+  }
+
+  commit() {
+    const e = this.edit; if (!e) return;
+    const text = this.input?.value().trim() ?? "";
+    this.edit = null;
+    if (!text) return;
+    this.save((b) => {
+      const col = b.columns.find((c) => c.id === e.column);
+      if (e.kind === "add" && col) col.cards.push({ id: uid(), title: text });
+      if (e.kind === "card" && col) { const card = col.cards.find((c) => c.id === e.card); if (card) card.title = text; }
+      if (e.kind === "column" && col) col.name = text;
+      if (e.kind === "new-column") b.columns.push({ id: uid(), name: text, cards: [] });
+    });
+  }
+
+  move(cardId, toColumn, beforeCard) {
+    this.save((b) => {
+      let card = null;
+      for (const c of b.columns) {
+        const i = c.cards.findIndex((x) => x.id === cardId);
+        if (i >= 0) card = c.cards.splice(i, 1)[0];
+      }
+      const to = b.columns.find((c) => c.id === toColumn);
+      if (!card || !to) return;
+      const at = beforeCard ? to.cards.findIndex((x) => x.id === beforeCard) : -1;
+      if (at >= 0) to.cards.splice(at, 0, card); else to.cards.push(card);
+    });
+  }
+
+  shift(cardId, from, step) {
+    const cols = this.board().columns;
+    const i = cols.findIndex((c) => c.id === from) + step;
+    if (i >= 0 && i < cols.length) this.move(cardId, cols[i].id);
+  }
+
+  remove(cardId, from) {
+    this.save((b) => { const c = b.columns.find((x) => x.id === from); if (c) c.cards = c.cards.filter((x) => x.id !== cardId); });
+  }
+
+  removeColumn(id) {
+    this.save((b) => { b.columns = b.columns.filter((c) => c.id !== id || c.cards.length); });
+  }
+
+  // A column takes the place of `to` (a column id) or moves `step` places.
+  moveColumn(id, to, step) {
+    this.save((b) => {
+      const from = b.columns.findIndex((c) => c.id === id);
+      if (from < 0) return;
+      const at = to ? b.columns.findIndex((c) => c.id === to) : from + step;
+      if (at < 0 || at >= b.columns.length || at === from) return;
+      b.columns.splice(at, 0, b.columns.splice(from, 1)[0]);
+    });
+  }
+
+  // Dragging a card (drag.card) or a column (drag.column, by its ⠿ grip).
+  drop(column, before, cx) {
+    const d = this.drag; this.drag = null; this.over = null;
+    if (d?.column) { if (d.column !== column) this.moveColumn(d.column, column); }
+    else if (d && (column !== d.from || (before && before !== d.card))) this.move(d.card, column, before);
+    cx.notify();
+  }
+
+  render() {
+    const t = theme();
+    if (this.open) return this.renderDetail(t);
+    this.day = today();
+    const b = this.board();
+    const stop = (_e, cx) => cx.stop_propagation();
+    const icon = (id, label, action) => div().id(id).w(20).h(20).flex().items_center().justify_center().rounded(4)
+      .text_size(14).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", stop).on_mouse_up("left", stop)
+      .on_click((_e, cx) => { cx.stop_propagation(); action(); cx.notify(); }).child(label);
+    const field = () => Input.new(this.input).h(32).px(8).rounded(7).border_1().border_color(t.accent)
+      .bg(t.background).text_size(12.8).text_color(t.foreground);
+
+    const card = (col, c, ci) => {
+      if (this.edit?.kind === "card" && this.edit.card === c.id) return div().id(`edit-${c.id}`).child(field());
+      const dragging = this.drag?.card === c.id;
+      // Due soon or overdue: the card takes that color (border, tinted background, date badge).
+      const u = urgency(c.due, col), hue = u?.color ? t[u.color] : null;
+      return v_flex().id(`card-${c.id}`).p(9).gap(4).rounded(8).border_1()
+        .border_color(dragging ? t.accent : hue ?? t.border).bg(hue ? tint(hue, "26") : t.raised).opacity(dragging ? 0.5 : 1)
+        .cursor_pointer().hover((s) => s.border_color(hue ?? t.input))
+        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.drag = { card: c.id, from: col.id }; cx.notify(); })
+        .on_mouse_up("left", (_e, cx) => {
+          cx.stop_propagation();
+          if (this.drag && this.drag.card !== c.id) return this.drop(col.id, c.id, cx);
+          this.drag = null; this.over = null;
+          openOverlay({ mod: "kanban", kind: "dialog", width: 540, height: 660, props: { board: this.boardName, open: c.id } });
+          cx.notify();
+        })
+        .child(div().text_size(12.8).text_color(t.foreground).child(c.title))
+        .when(Boolean(c.description), (el) => {
+          // About two lines of it at this width.
+          const flat = c.description.replace(/\s*\n\s*/g, " ");
+          return el.child(div().text_size(11.8).text_color(t.muted).child(flat.length > 90 ? `${flat.slice(0, 88).trimEnd()}…` : flat));
+        })
+        .child(h_flex().gap(4).items_center()
+          .when(Boolean(u), (el) => el.child(div().px(6).rounded(6).text_size(11)
+            .bg(hue ? tint(hue, "40") : t.hover).text_color(hue ? t.foreground : t.muted).child(`📅 ${u.label.replace(/^Due (?=\d)/, "")}`)))
+          .when((c.tasks ?? []).length > 0, (el) => {
+            const n = c.tasks.length, d = c.tasks.filter((x) => x.done).length;
+            return el.child(div().px(6).rounded(6).text_size(11).bg(d === n ? t.selected : t.hover)
+              .text_color(d === n ? t.foreground : t.muted).child(`☑ ${d}/${n}`));
+          })
+          .child(div().flex_1())
+          .when(ci > 0, (el) => el.child(icon(`l-${c.id}`, "‹", () => this.shift(c.id, col.id, -1))))
+          .when(ci < b.columns.length - 1, (el) => el.child(icon(`r-${c.id}`, "›", () => this.shift(c.id, col.id, 1))))
+          .child(icon(`x-${c.id}`, "×", () => this.remove(c.id, col.id))));
+    };
+
+    const column = (col, ci) => {
+      const renaming = this.edit?.kind === "column" && this.edit.column === col.id;
+      const adding = this.edit?.kind === "add" && this.edit.column === col.id;
+      const target = Boolean(this.drag) && this.over === col.id && this.drag.column !== col.id;
+      const moving = this.drag?.column === col.id;
+      return v_flex().id(`col-${col.id}`).w(272).flex_none().p(8).gap(6).rounded(10)
+        .border_1().border_color(target || moving ? t.accent : t.border).bg(t.surface).opacity(moving ? 0.5 : 1)
+        .on_hover((h, cx) => { if (this.drag) { if (h) this.over = col.id; else if (this.over === col.id) this.over = null; cx.notify(); } })
+        .on_mouse_up("left", (_e, cx) => { cx.stop_propagation(); this.drop(col.id, null, cx); })
+        .child(renaming ? field()
+          : h_flex().h(26).px(2).gap(4).items_center()
+            .child(div().id(`grip-${col.id}`).w(16).h(22).flex().items_center().justify_center().rounded(4)
+              .text_size(12).text_color(t.dim).cursor_grab().hover((s) => s.bg(t.hover).text_color(t.foreground))
+              .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.drag = { column: col.id }; this.over = col.id; cx.notify(); })
+              .child("⠿"))
+            .child(div().id(`name-${col.id}`).flex_1().min_w(0).truncate().text_size(12.5).font_semibold().text_color(t.foreground)
+              .cursor_pointer().on_click((_e, cx) => { this.start({ kind: "column", column: col.id }, col.name, "Column"); cx.notify(); })
+              .child(col.name))
+            .child(div().px(6).rounded(8).bg(t.hover).text_size(11).text_color(t.muted).child(String(col.cards.length)))
+            .when(ci > 0, (el) => el.child(icon(`cl-${col.id}`, "‹", () => this.moveColumn(col.id, null, -1))))
+            .when(ci < b.columns.length - 1, (el) => el.child(icon(`cr-${col.id}`, "›", () => this.moveColumn(col.id, null, 1))))
+            .when(!col.cards.length && b.columns.length > 1, (el) => el.child(icon(`xc-${col.id}`, "×", () => this.removeColumn(col.id)))))
+        .child(v_flex().id(`cards-${col.id}`).gap(6)
+          .children(col.cards.map((c) => card(col, c, ci))))
+        .child(adding ? v_flex().gap(4).child(field()).child(div().px(2).text_size(11).text_color(t.dim).child("Enter adds · Esc stops"))
+          : h_flex().id(`add-${col.id}`).h(28).px(6).rounded(7).items_center().text_size(12).text_color(t.dim)
+            .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .on_click((_e, cx) => { this.start({ kind: "add", column: col.id }, "", "Card title"); cx.notify(); })
+            .child("+ Add card"));
+    };
+
+    const total = b.columns.reduce((n, c) => n + c.cards.length, 0);
+    return v_flex().id("kanban").track_focus(this.handle).size_full().bg(t.background).text_color(t.foreground)
+      .on_key_down((e, cx) => { if (e.key === "escape" && this.edit) { this.edit = null; this.handle.focus(); cx.notify(); } })
+      .on_mouse_up("left", (_e, cx) => { if (this.drag) { this.drag = null; this.over = null; cx.notify(); } })
+      .child(h_flex().h(44).flex_none().px(16).gap(10).items_center().border_b(1).border_color(t.border)
+        .child(svg_icon(t))
+        .child(div().text_size(14).font_semibold().child("Kanban"))
+        .child(div().text_size(12).text_color(t.dim).child(`${total} card${total === 1 ? "" : "s"}`))
+        .child(div().flex_1())
+        .when(Boolean(this.drag), (el) => el.child(div().text_size(12).text_color(t.muted).child(this.drag?.column ? "Release over another column to put this one there" : "Release over a column or card to move")))
+        .child(this.edit?.kind === "new-column" ? div().w(200).child(field())
+          : h_flex().id("new-column").h(28).px(10).rounded(7).items_center().text_size(12).text_color(t.muted)
+            .border_1().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .on_click((_e, cx) => { this.start({ kind: "new-column" }, "", "Column name"); cx.notify(); })
+            .child("+ Column")))
+      // The board scrolls as a whole: down when a column runs long, sideways when columns don't fit.
+      .child(div().id("board").flex_1().min_h(0).overflow_y_scrollbar()
+        .child(h_flex().id("columns").p(14).gap(12).items_start().overflow_x_scrollbar()
+          .children(b.columns.map(column))));
+  }
+}
+
+function svg_icon(t) {
+  return svg("mods/kanban/kanban.svg").size(16).text_color(t.muted);
+}
