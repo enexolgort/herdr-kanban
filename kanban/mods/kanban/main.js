@@ -64,6 +64,20 @@ function pill(t, label, size = 10.5) {
   return div().px(6).rounded(5).text_size(size).bg(tint(c, "33")).text_color(c).child(label.name);
 }
 
+// ---- Archive ----
+const ARCHIVE_AFTER = 14; // days a card stays in a Done/Archive column before it's archived
+
+/** Moves a card from its column into b.archive, remembering where it was. */
+function archiveCard(b, cardId, auto = false) {
+  for (const col of b.columns) {
+    const i = col.cards.findIndex((x) => x.id === cardId);
+    if (i < 0) continue;
+    const card = col.cards.splice(i, 1)[0];
+    b.archive = [{ ...card, archivedAt: today(), from: col.id, fromName: col.name, ...(auto ? { auto: true } : {}) }, ...(b.archive ?? [])];
+    return;
+  }
+}
+
 // ---- Priority: "high", "low", or none (normal). High cards show first in their column ----
 const PRIORITY = {
   high: { label: "High", mark: "▲", color: "ansi5", rank: 0 },
@@ -120,7 +134,15 @@ export default class Kanban extends View {
 
   initBoard(cx) {
     // Due colors move at midnight: look again every 10 minutes.
-    cx.timer.every(600000, (cx) => { if (this.day !== today()) cx.notify(); });
+    // The same timer archives Done cards that have waited ARCHIVE_AFTER days (and once now). Cards
+    // already in Done without a date get today's, so nothing is archived on the first run.
+    const tick = () => {
+      const b = this.board();
+      if (b.columns.some((col) => finished(col) && col.cards.some((c) => !c.doneAt))) this.save(() => {});
+      this.sweep();
+    };
+    tick();
+    cx.timer.every(600000, (cx) => { tick(); if (this.day !== today()) cx.notify(); });
     // Search: every word must appear in the card (title, description, tasks, labels, linked tab).
     this.query = "";
     this.search = InputState.new({ placeholder: "Search" });
@@ -381,7 +403,7 @@ export default class Kanban extends View {
     const close = () => closeOverlay(props().overlay);
     if (!found) {
       return v_flex().id("detail").size_full().p(20).gap(12).bg(t.popover).text_color(t.muted).text_size(13)
-        .child("This card was deleted.").child(div().id("gone-close").cursor_pointer().text_color(t.accent).on_click(close).child("Close"));
+        .child("This card was archived or deleted.").child(div().id("gone-close").cursor_pointer().text_color(t.accent).on_click(close).child("Close"));
     }
     const { col, card } = found;
     const tasks = card.tasks ?? [];
@@ -448,7 +470,7 @@ export default class Kanban extends View {
         .children(tasks.map((x, i) => row(x, i)))
         .child(div().pt(6).child(Input.new(this.task).h(32).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(12.8).text_color(t.foreground))))
       .child(h_flex().p(14).gap(8).border_t(1).border_color(t.border)
-        .child(button("delete-card", "Delete card", () => { this.save((b) => { for (const c of b.columns) c.cards = c.cards.filter((x) => x.id !== card.id); }); close(); }, true))
+        .child(button("archive-card", "Archive card", () => { this.save((b) => archiveCard(b, card.id)); close(); }))
         .child(div().flex_1())
         .child(button("close-card", "Close", close)));
   }
@@ -461,6 +483,10 @@ export default class Kanban extends View {
   save(fn) {
     const b = JSON.parse(JSON.stringify(this.board()));
     fn(b);
+    // When a card reached a finished column (Done, Archive): the archive's clock.
+    for (const col of b.columns) for (const c of col.cards) {
+      if (finished(col)) c.doneAt ??= today(); else delete c.doneAt;
+    }
     setShared(this.key, b);
   }
 
@@ -521,8 +547,33 @@ export default class Kanban extends View {
     if (i >= 0 && i < cols.length) this.move(cardId, cols[i].id);
   }
 
+  // ---- Archive: removing a card puts it here; Done cards go by themselves after ARCHIVE_AFTER days ----
+
+  /** Takes a card off the board into the archive (newest first). */
   remove(cardId, from) {
-    this.save((b) => { const c = b.columns.find((x) => x.id === from); if (c) c.cards = c.cards.filter((x) => x.id !== cardId); });
+    this.save((b) => archiveCard(b, cardId));
+  }
+
+  /** Archives cards that have been in a finished column for ARCHIVE_AFTER days. */
+  sweep() {
+    const b = this.board();
+    const old = b.columns.filter(finished).flatMap((c) => c.cards).filter((c) => c.doneAt && daysLeft(c.doneAt) <= -ARCHIVE_AFTER);
+    if (old.length) this.save((bb) => { for (const c of old) archiveCard(bb, c.id, true); });
+  }
+
+  /** Back on the board: in the column it left (or the first), at the end. */
+  restore(id) {
+    this.save((b) => {
+      const i = (b.archive ?? []).findIndex((x) => x.id === id);
+      if (i < 0) return;
+      const { archivedAt, from, fromName, auto, ...card } = b.archive.splice(i, 1)[0];
+      delete card.doneAt; // a restored Done card starts its 14 days again
+      (b.columns.find((c) => c.id === from) ?? b.columns[0]).cards.push(card);
+    });
+  }
+
+  forget(id) {
+    this.save((b) => { b.archive = (b.archive ?? []).filter((x) => x.id !== id); });
   }
 
   removeColumn(id) {
@@ -556,7 +607,7 @@ export default class Kanban extends View {
   // ---- Keyboard (board) ----
   //   ← → ↑ ↓ or h j k l   select a card          Enter   open it
   //   Shift + ← →          move it to a column    Shift + ↑ ↓   move it up or down
-  //   n   new card in the selected card's column   /   search      x or Delete   delete it
+  //   n   new card in the selected card's column   /   search      x or Delete   archive it
   //   ?   show these keys                          Esc   clear the selection
 
   key(e, cx) {
@@ -768,6 +819,12 @@ export default class Kanban extends View {
             .on_click((_e, cx) => { this.search.set_value(""); this.query = ""; cx.notify(); }).child("×"))))
         .child(filterBar)
         .when(Boolean(this.drag), (el) => el.child(div().text_size(12).text_color(t.muted).child(this.drag?.column ? "Release over another column to put this one there" : "Release over a column or card to move")))
+        .child(h_flex().id("archive-toggle").flex_none().h(28).px(10).gap(6).rounded(7).items_center().text_size(12)
+          .border_1().border_color(this.showArchive ? t.accent : t.border).bg(this.showArchive ? t.selected : t.background)
+          .text_color(this.showArchive ? t.foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, cx) => { this.showArchive = !this.showArchive; cx.notify(); })
+          .child(this.showArchive ? "← Board" : "Archive")
+          .when(!this.showArchive && (b.archive ?? []).length > 0, (el) => el.child(div().px(5).rounded(6).bg(t.hover).text_size(11).child(String(b.archive.length)))))
         .child(this.edit?.kind === "new-column" ? div().w(200).child(field())
           : h_flex().id("new-column").flex_none().h(28).px(10).rounded(7).items_center().text_size(12).text_color(t.muted)
             .border_1().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
@@ -780,12 +837,37 @@ export default class Kanban extends View {
       .when(this.showKeys, (el) => el.child(h_flex().flex_none().px(16).py(8).gap(18).flex_wrap().border_b(1).border_color(t.border)
         .bg(t.surface).text_size(11.5).text_color(t.muted)
         .children([["← → ↑ ↓  h j k l", "select"], ["Enter", "open"], ["Shift ← →", "move to column"], ["Shift ↑ ↓", "move up/down"],
-          ["n", "new card"], ["/", "search"], ["x  Del", "delete"], ["Esc", "clear"]]
+          ["n", "new card"], ["/", "search"], ["x  Del", "archive"], ["Esc", "clear"]]
           .map(([keys, what]) => h_flex().gap(6).child(div().px(5).rounded(4).bg(t.hover).text_color(t.foreground).child(keys)).child(what)))))
-      // The board scrolls as a whole: down when a column runs long, sideways when columns don't fit.
-      .child(div().id("board").flex_1().min_h(0).overflow_y_scrollbar()
-        .child(h_flex().id("columns").p(14).gap(12).items_start().overflow_x_scrollbar()
-          .children(b.columns.map(column))));
+      .child(this.showArchive ? this.renderArchive(t, b)
+        // The board scrolls as a whole: down when a column runs long, sideways when columns don't fit.
+        : div().id("board").flex_1().min_h(0).overflow_y_scrollbar()
+          .child(h_flex().id("columns").p(14).gap(12).items_start().overflow_x_scrollbar()
+            .children(b.columns.map(column))));
+  }
+
+  // The archive: newest first, with the search and label filter applied. Restore puts a card back
+  // in the column it left; Delete forever removes it.
+  renderArchive(t, b) {
+    const all = b.archive ?? [], shown = all.filter((c) => this.visible(c, b));
+    const byId = new Map(boardLabels(b).map((l) => [l.id, l]));
+    const btn = (id, label, action, danger) => h_flex().id(id).flex_none().h(26).px(10).items_center().rounded(6).text_size(12)
+      .border_1().border_color(t.border).text_color(danger ? t.blocked : t.foreground).cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { action(); cx.notify(); }).child(label);
+    const row = (c) => h_flex().id(`ar-${c.id}`).px(14).py(10).gap(12).items_center().rounded(8).border_1().border_color(t.border).bg(t.surface)
+      .child(v_flex().flex_1().min_w(0).gap(4)
+        .when((c.labels ?? []).length > 0, (el) => el.child(h_flex().gap(4).children(c.labels.map((id) => byId.get(id)).filter(Boolean).map((l) => pill(t, l)))))
+        .child(div().text_size(13).text_color(t.foreground).child(c.title))
+        .child(div().text_size(11.5).text_color(t.dim).child(
+          `${c.auto ? "Archived by itself" : "Archived"} ${short(c.archivedAt)} · from ${c.fromName ?? "?"}` +
+          ((c.tasks ?? []).length ? ` · ☑ ${c.tasks.filter((x) => x.done).length}/${c.tasks.length}` : ""))))
+      .child(btn(`rs-${c.id}`, "Restore", () => this.restore(c.id)))
+      .child(btn(`fg-${c.id}`, "Delete forever", () => this.forget(c.id), true));
+    return v_flex().id("archive").flex_1().min_h(0).overflow_y_scrollbar().p(14).gap(8)
+      .child(div().text_size(12).text_color(t.dim).pb(4).child(
+        `Removed cards land here, and cards that sit ${ARCHIVE_AFTER} days in Done go here by themselves. ` +
+        (all.length ? `${shown.length === all.length ? all.length : `${shown.length} of ${all.length}`} archived.` : "Nothing archived yet.")))
+      .children(shown.map(row));
   }
 }
 

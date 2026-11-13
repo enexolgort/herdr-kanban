@@ -27,9 +27,17 @@ All notable changes to the Kanban mod. Dates are when the change was made.
   the next column, Shift + ↑ ↓ moves it up or down (within its priority), n adds a card to the
   selected card's column, / jumps to search, x or Delete deletes it, and Esc clears the
   selection, the search or an input. `?` (or the ? button in the header) shows the keys.
+- **Archive.** Cards are archived instead of deleted: × on a card, x or Delete, and "Archive
+  card" in an open card all move it to the archive. Cards that have been in a Done or Archive
+  column for 14 days are archived on their own (cards already there count from the day this
+  version first runs). The header's "Archive" button (with a count) shows the archive, newest
+  first, filtered by the search and labels. Each archived card shows where it came from and
+  when, with "Restore", which puts it back at the end of that column, and "Delete forever".
 
 ### Changed
 
+- Removing a card no longer deletes it; see Archive. "Delete card" in an open card is now
+  "Archive card".
 - The header keeps its title, count and "+ Column" button at full size in a narrow window; the
   label filter takes the leftover space and scrolls sideways.
 
