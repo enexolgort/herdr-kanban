@@ -14,7 +14,7 @@
 // Enter adds the next, drag the ⠿ grip or ↑ ↓ to reorder).
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, CalendarState } from "gpui-base";
-import { theme, props, shared, setShared, openOverlay, closeOverlay } from "herdr";
+import { theme, props, shared, setShared, openOverlay, closeOverlay, spaces, panes, run } from "herdr";
 
 const DEFAULT = {
   columns: [
@@ -46,6 +46,33 @@ function urgency(due, col) {
   if (n === 1) return { color: "ansi3", label: "Due tomorrow" };
   if (n <= 7) return { color: "ansi4", label: `Due ${short(due)} · ${n} days` };
   return { color: null, label: `Due ${short(due)}` };
+}
+
+// ---- Linked tabs: a card can point at a tab and show its agents' status ----
+const STATUS_LABEL = { working: "working", blocked: "needs you", done: "done", idle: "idle" };
+
+/** A tab's name as the tab bar shows it: its own, else its agent's, else its position. */
+function tabLabel(tab) {
+  if (tab.named) return tab.name;
+  const p = panes().find((x) => x.tab === tab.id && x.program?.agent) ?? panes().find((x) => x.tab === tab.id);
+  return p?.mod ? p.title : p?.program?.name ?? `Tab ${tab.index}`;
+}
+
+/** The space and tab a link points at, or null when that tab is gone. */
+function linked(link) {
+  if (!link) return null;
+  for (const space of spaces()) {
+    const tab = space.tabs.find((x) => x.id === link.tab);
+    if (tab) return { space, tab };
+  }
+  return null;
+}
+
+function goToTab(link) {
+  const l = linked(link);
+  if (!l) return;
+  if (!l.space.active) run("space.select", { id: l.space.id });
+  run("tab.select", { id: l.tab.id });
 }
 
 /** A theme color with an alpha, for tinted card backgrounds. */
@@ -97,6 +124,7 @@ export default class Kanban extends View {
       this.updateCard((c) => { if (text) c.description = text; else delete c.description; });
     });
     this.picking = false;
+    this.linking = false;
     this.calendar = CalendarState.new();
     if (found?.card.due) this.calendar.set_value(found.card.due);
     this.calendar.on("change", (date, cx) => {
@@ -177,6 +205,44 @@ export default class Kanban extends View {
     return v_flex().gap(8).child(row).child(grid);
   }
 
+  // The Tab row: which tab this card is about, its agents' status, and a picker to link one.
+  renderLink(t, card) {
+    const chip = (id, label, action, color) => h_flex().id(id).h(24).px(9).gap(6).items_center().rounded(12).text_size(11.5)
+      .border_1().border_color(t.border).bg(t.background).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { action(); cx.notify(); })
+      .when(Boolean(color), (el) => el.child(div().size(7).rounded(4).bg(color))).child(label);
+    const l = linked(card.link);
+    let row = h_flex().gap(6).items_center().flex_wrap().child(div().w(34).text_size(11.5).text_color(t.dim).child("Tab"));
+    if (card.link) {
+      row = row.child(div().text_size(12).text_color(l ? t.foreground : t.dim).child(l ? `${l.space.name} › ${tabLabel(l.tab)}` : `${card.link.name} (closed)`))
+        .when(Boolean(l?.tab.status), (el) => el.child(h_flex().gap(5).items_center().text_size(11.5).text_color(t[l.tab.status])
+          .child(div().size(7).rounded(4).bg(t[l.tab.status])).child(STATUS_LABEL[l.tab.status])))
+        .when(Boolean(l), (el) => el.child(chip("link-go", "Go to tab", () => { closeOverlay(props().overlay); goToTab(card.link); })))
+        .child(chip("link-change", this.linking ? "Cancel" : "Change", () => { this.linking = !this.linking; }))
+        .child(chip("link-off", "Unlink", () => { this.updateCard((c) => { delete c.link; }); this.linking = false; }));
+    } else {
+      row = row.child(chip("link-pick", this.linking ? "Cancel" : "Link a tab…", () => { this.linking = !this.linking; }));
+    }
+    if (!this.linking) return row;
+    // Every tab but the Kanban board's own, grouped by space; the agent's status dot when there is one.
+    const kanbanTabs = new Set(panes().filter((p) => p.mod === "kanban").map((p) => p.tab));
+    const groups = spaces().map((s) => ({ s, tabs: s.tabs.filter((x) => !kanbanTabs.has(x.id)) })).filter((g) => g.tabs.length);
+    return v_flex().gap(8).child(row)
+      .child(v_flex().id("link-list").max_h(220).overflow_y_scrollbar().p(6).gap(1).rounded(8).border_1().border_color(t.border).bg(t.background)
+        .children(groups.map(({ s, tabs }) => v_flex()
+          .child(div().px(6).pt(4).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child(s.name.toUpperCase()))
+          .children(tabs.map((x) => h_flex().id(`lk-${x.id}`).h(26).px(8).gap(8).items_center().rounded(5).text_size(12)
+            .cursor_pointer().hover((st) => st.bg(t.hover))
+            .on_click((_e, cx) => {
+              this.updateCard((c) => { c.link = { tab: x.id, space: s.id, name: tabLabel(x) }; });
+              this.linking = false;
+              cx.notify();
+            })
+            .child(div().size(7).rounded(4).bg(x.status ? t[x.status] : t.border))
+            .child(div().flex_1().truncate().child(tabLabel(x)))
+            .when(Boolean(x.status), (el) => el.child(div().text_size(11).text_color(t.dim).child(STATUS_LABEL[x.status]))))))));
+  }
+
   editTask(task) {
     const input = InputState.new({ value: task.text });
     input.set_selected_range({ start: 0, end: task.text.length });
@@ -250,7 +316,8 @@ export default class Kanban extends View {
             .border_1().border_color(c.id === col.id ? t.accent : t.border).bg(c.id === col.id ? t.selected : t.background)
             .text_color(c.id === col.id ? t.foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
             .on_click((_e, cx) => { if (c.id !== col.id) this.move(card.id, c.id); cx.notify(); }).child(c.name))))
-        .child(this.renderDue(t, card, col)))
+        .child(this.renderDue(t, card, col))
+        .child(this.renderLink(t, card)))
       .on_mouse_up("left", (_e, cx) => { if (this.taskDrag) { this.taskDrag = null; this.taskOver = null; cx.notify(); } })
       .child(v_flex().id("tasks").flex_1().min_h(0).p(14).gap(4).overflow_y_scrollbar()
         .child(div().px(6).pb(6).text_size(12.5).font_semibold().child("Description"))
@@ -398,6 +465,17 @@ export default class Kanban extends View {
           // About two lines of it at this width.
           const flat = c.description.replace(/\s*\n\s*/g, " ");
           return el.child(div().text_size(11.8).text_color(t.muted).child(flat.length > 90 ? `${flat.slice(0, 88).trimEnd()}…` : flat));
+        })
+        .when(Boolean(c.link), (el) => {
+          // The linked tab: its agents' status, a click goes there.
+          const l = linked(c.link), st = l?.tab.status;
+          return el.child(h_flex().id(`go-${c.id}`).gap(6).items_center().px(6).py(2).rounded(6).text_size(11)
+            .bg(t.hover).text_color(l ? t.foreground : t.dim).cursor_pointer().hover((s) => s.bg(t.selected))
+            .on_mouse_down("left", stop).on_mouse_up("left", stop)
+            .on_click((_e, cx) => { cx.stop_propagation(); goToTab(c.link); })
+            .child(div().size(7).flex_none().rounded(4).bg(st ? t[st] : t.border))
+            .child(div().flex_1().min_w(0).truncate().child(l ? tabLabel(l.tab) : `${c.link.name} (closed)`))
+            .when(Boolean(st), (e2) => e2.child(div().text_color(t[st]).child(STATUS_LABEL[st]))));
         })
         .child(h_flex().gap(4).items_center()
           .when(Boolean(u), (el) => el.child(div().px(6).rounded(6).text_size(11)

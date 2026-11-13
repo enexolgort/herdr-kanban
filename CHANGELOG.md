@@ -1,0 +1,33 @@
+# Changelog
+
+All notable changes to the Kanban mod. Dates are when the change was made.
+
+## Unreleased
+
+### New
+
+- **Link a card to a tab.** In an open card, "Link a tab…" lists every tab, grouped by space,
+  with its agent status. The linked card shows that tab's status live on the board (working,
+  needs you, done, idle), and clicking it goes to the tab, switching space if needed. "Go to
+  tab", "Change" and "Unlink" are in the card's Tab row. A closed tab shows as "(closed)".
+
+## 0.1.0 — 2026-11-13
+
+### New
+
+- **Board in its own tab.** `tab.new {name: "Kanban", mod: "kanban"}` (or `ctrl-shift-m` with
+  `keys.json`) opens To do / Doing / Done. The board is kept in Herdr's shared state, so every
+  open copy shows the same cards and they survive restarts.
+- **Cards.** Add with "+ Add card" (Enter adds the next one too), drag between columns or onto
+  another card, move with ‹ ›, delete with ×.
+- **Columns.** Add, rename (click the name), remove when empty, and reorder by dragging the ⠿
+  grip or with ‹ ›.
+- **Open card.** Clicking a card opens it as a dialog: title, column, due date, description and a
+  task list.
+- **Task list.** Add with Enter, tick, click to edit, × to remove, reorder with the ⠿ grip or ↑ ↓.
+  The board card shows `☑ done/total`.
+- **Due dates.** Today, Tomorrow, In a week, or Pick… from a month calendar. Cards turn red when
+  overdue, yellow when due today or tomorrow, and blue within a week. Cards in a Done or Archive
+  column don't warn.
+- **Descriptions.** A text box in the open card, with the first ~90 characters shown on the
+  board.
