@@ -108,8 +108,25 @@ export default class Kanban extends View {
     if (!shared(this.key)) setShared(this.key, DEFAULT);
     this.open = props()?.open ?? null;
     if (this.open) this.initDetail();
+    else this.initBoard(cx);
+  }
+
+  initBoard(cx) {
     // Due colors move at midnight: look again every 10 minutes.
-    else cx.timer.every(600000, (cx) => { if (this.day !== today()) cx.notify(); });
+    cx.timer.every(600000, (cx) => { if (this.day !== today()) cx.notify(); });
+    // Search: every word must appear in the card (title, description, tasks, labels, linked tab).
+    this.query = "";
+    this.search = InputState.new({ placeholder: "Search" });
+    this.search.on("change", (_e, cx) => { this.query = this.search.value(); cx.notify(); });
+    this.search.on("focus", (_e, cx) => { this.searching = true; cx.notify(); });
+    this.search.on("blur", (_e, cx) => { this.searching = false; cx.notify(); });
+  }
+
+  /** Everything a search looks in, lowercased. */
+  haystack(card, b) {
+    const byId = new Map(boardLabels(b).map((l) => [l.id, l.name]));
+    return [card.title, card.description, ...(card.tasks ?? []).map((x) => x.text),
+      ...(card.labels ?? []).map((id) => byId.get(id)), card.link?.name].filter(Boolean).join("\n").toLowerCase();
   }
 
   // ---- An open card (dialog) ----
@@ -488,9 +505,11 @@ export default class Kanban extends View {
     });
   }
 
-  /** Whether a card passes the board's filters (the label filter). */
+  /** Whether a card passes the board's filters: the label filter and the search. */
   visible(card, b) {
     if (this.labelFilter && !(card.labels ?? []).includes(this.labelFilter)) return false;
+    const words = (this.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+    if (words.length) { const h = this.haystack(card, b); if (!words.every((w) => h.includes(w))) return false; }
     return true;
   }
 
@@ -602,27 +621,37 @@ export default class Kanban extends View {
     // The label filter: one label at a time, click again to show everything.
     const usedLabels = new Set(b.columns.flatMap((c) => c.cards.flatMap((x) => x.labels ?? [])));
     if (this.labelFilter && !usedLabels.has(this.labelFilter)) this.labelFilter = null;
-    const filterBar = h_flex().gap(4).items_center().children(boardLabels(b).filter((l) => usedLabels.has(l.id)).map((l) => {
+    const filterBar = h_flex().id("filters").flex_1().min_w(0).gap(4).items_center().overflow_x_scroll().children(boardLabels(b).filter((l) => usedLabels.has(l.id)).map((l) => {
       const c = t[l.color] ?? t.muted, on = this.labelFilter === l.id;
-      return h_flex().id(`flt-${l.id}`).h(24).px(8).gap(5).items_center().rounded(12).text_size(11.5)
+      return h_flex().id(`flt-${l.id}`).h(24).flex_none().px(8).gap(5).items_center().rounded(12).text_size(11.5)
         .border_1().border_color(on ? c : t.border).bg(on ? tint(c, "33") : t.background).text_color(on ? c : t.muted)
         .cursor_pointer().hover((s) => s.bg(on ? tint(c, "4d") : t.hover))
         .on_click((_e, cx) => { this.labelFilter = on ? null : l.id; cx.notify(); })
         .child(div().size(7).rounded(4).bg(c)).child(l.name);
     }));
     return v_flex().id("kanban").track_focus(this.handle).size_full().bg(t.background).text_color(t.foreground)
-      .on_key_down((e, cx) => { if (e.key === "escape" && this.edit) { this.edit = null; this.handle.focus(); cx.notify(); } })
+      .on_key_down((e, cx) => {
+        if (e.key !== "escape") return;
+        if (this.edit) { this.edit = null; this.handle.focus(); cx.notify(); }
+        else if (this.searching) { this.search.set_value(""); this.query = ""; this.handle.focus(); cx.notify(); }
+      })
       .on_mouse_up("left", (_e, cx) => { if (this.drag) { this.drag = null; this.over = null; cx.notify(); } })
       .child(h_flex().h(44).flex_none().px(16).gap(10).items_center().border_b(1).border_color(t.border)
         .child(svg_icon(t))
-        .child(div().text_size(14).font_semibold().child("Kanban"))
-        .child(div().text_size(12).text_color(t.dim).child(shown === total ? `${total} card${total === 1 ? "" : "s"}` : `${shown} of ${total} cards`))
+        .child(div().flex_none().text_size(14).font_semibold().child("Kanban"))
+        .child(div().flex_none().text_size(12).text_color(t.dim).child(shown === total ? `${total} card${total === 1 ? "" : "s"}` : `${shown} of ${total} cards`))
         .child(div().w(8))
+        .child(h_flex().w(220).flex_none().h(28).px(8).gap(6).items_center().rounded(7).border_1()
+          .border_color(this.searching ? t.accent : t.input).bg(t.background)
+          .child(div().text_size(12).text_color(t.dim).child("⌕"))
+          .child(div().flex_1().min_w(0).child(Input.new(this.search).h(26).text_size(12.5).text_color(t.foreground)))
+          .when(Boolean(this.query), (el) => el.child(div().id("search-clear").w(16).h(16).flex().items_center().justify_center()
+            .rounded(8).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .on_click((_e, cx) => { this.search.set_value(""); this.query = ""; cx.notify(); }).child("×"))))
         .child(filterBar)
-        .child(div().flex_1())
         .when(Boolean(this.drag), (el) => el.child(div().text_size(12).text_color(t.muted).child(this.drag?.column ? "Release over another column to put this one there" : "Release over a column or card to move")))
         .child(this.edit?.kind === "new-column" ? div().w(200).child(field())
-          : h_flex().id("new-column").h(28).px(10).rounded(7).items_center().text_size(12).text_color(t.muted)
+          : h_flex().id("new-column").flex_none().h(28).px(10).rounded(7).items_center().text_size(12).text_color(t.muted)
             .border_1().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_click((_e, cx) => { this.start({ kind: "new-column" }, "", "Column name"); cx.notify(); })
             .child("+ Column")))
@@ -634,5 +663,5 @@ export default class Kanban extends View {
 }
 
 function svg_icon(t) {
-  return svg("mods/kanban/kanban.svg").size(16).text_color(t.muted);
+  return svg("mods/kanban/kanban.svg").flex_none().size(16).text_color(t.muted);
 }

@@ -15,6 +15,14 @@ All notable changes to the Kanban mod. Dates are when the change was made.
   next color) and × deletes a label no card uses. Cards show their labels as pills above the
   title. The header has a filter with one button per label in use: click one to show only its
   cards ("2 of 5 cards"), click it again to show them all.
+- **Search.** A box in the header that keeps only the cards matching every word typed. It
+  looks in the title, description, tasks, labels and linked tab name. It combines with the
+  label filter. × or Esc clears it.
+
+### Changed
+
+- The header keeps its title, count and "+ Column" button at full size in a narrow window; the
+  label filter takes the leftover space and scrolls sideways.
 
 ## 0.1.0 — 2026-11-13
 
