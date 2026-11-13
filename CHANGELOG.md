@@ -33,6 +33,14 @@ All notable changes to the Kanban mod. Dates are when the change was made.
   version first runs). The header's "Archive" button (with a count) shows the archive, newest
   first, filtered by the search and labels. Each archived card shows where it came from and
   when, with "Restore", which puts it back at the end of that column, and "Delete forever".
+- **Due cards in the status bar.** The same mod with `props {status: true}` is a status-bar
+  block: "1 overdue · 2 due today", red when anything is overdue, yellow when something is
+  due today, "nothing due" otherwise. Clicking it shows the space's Kanban tab, or opens one.
+  Cards in Done or Archive columns don't count.
+- **Morning notification.** Once a day, from 8:00 (local), a notification lists what's overdue
+  or due today, with the first four titles. Clicking it opens a Kanban tab. Whichever copy
+  (board or status bar) checks first sends it; shared state (`kanban.notified.<board>`)
+  remembers the day, so only one goes out.
 
 ### Changed
 

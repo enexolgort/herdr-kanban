@@ -14,7 +14,7 @@
 // Enter adds the next, drag the ⠿ grip or ↑ ↓ to reorder).
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, CalendarState } from "gpui-base";
-import { theme, props, shared, setShared, openOverlay, closeOverlay, spaces, panes, run, nextCommand } from "herdr";
+import { theme, props, shared, setShared, openOverlay, closeOverlay, spaces, panes, run, nextCommand, notify } from "herdr";
 
 const DEFAULT = {
   columns: [
@@ -62,6 +62,39 @@ const boardLabels = (b) => b.labels ?? DEFAULT_LABELS;
 function pill(t, label, size = 10.5) {
   const c = t[label.color] ?? t.muted;
   return div().px(6).rounded(5).text_size(size).bg(tint(c, "33")).text_color(c).child(label.name);
+}
+
+// ---- Due today / overdue: the status bar block and the morning notification ----
+const MORNING = 8; // the notification goes out from this hour (local), once a day
+
+/** Cards on the board that are overdue or due today (not in a finished column). */
+function dueNow(b) {
+  const out = { overdue: [], today: [] };
+  for (const col of b.columns) {
+    if (finished(col)) continue;
+    for (const c of col.cards) {
+      if (!c.due) continue;
+      const n = daysLeft(c.due);
+      if (n < 0) out.overdue.push(c); else if (n === 0) out.today.push(c);
+    }
+  }
+  return out;
+}
+
+/** "2 overdue · 1 due today", or "" when nothing is. */
+function dueText({ overdue, today: tod }) {
+  return [overdue.length && `${overdue.length} overdue`, tod.length && `${tod.length} due today`].filter(Boolean).join(" · ");
+}
+
+/** Shows the space's Kanban tab, or opens one (like the tab bar's Insights button). */
+function openBoard(board) {
+  const space = spaces().find((s) => s.active);
+  const ids = new Set(space?.tabs.map((x) => x.id) ?? []);
+  const open = panes().find((p) => p.mod === "kanban" && ids.has(p.tab));
+  if (!open) return run("tab.new", { name: "Kanban", mod: "kanban", ...(board && board !== "main" ? { props: { board } } : {}) });
+  const zoomed = panes().find((p) => p.tab === open.tab && p.zoomed);
+  if (zoomed && zoomed.pane !== open.pane) run("pane.zoom", { pane: zoomed.pane });
+  run("pane.focus", { pane: open.pane });
 }
 
 // ---- Archive ----
@@ -128,8 +161,44 @@ export default class Kanban extends View {
     this.handle = cx.focus_handle();
     if (!shared(this.key)) setShared(this.key, DEFAULT);
     this.open = props()?.open ?? null;
+    this.status = Boolean(props()?.status);
     if (this.open) this.initDetail();
+    else if (this.status) this.initStatus(cx);
     else this.initBoard(cx);
+  }
+
+  // ---- Status bar block (props {status: true}) ----
+
+  initStatus(cx) {
+    this.morning();
+    cx.timer.every(600000, (cx) => { this.morning(); cx.notify(); });
+  }
+
+  /** Once a day, from MORNING on: a notification of what's overdue or due today. Whichever copy
+   *  (board or status bar) looks first sends it; shared state remembers the day. */
+  morning() {
+    const now = new Date(), key = `kanban.notified.${this.boardName}`;
+    if (now.getHours() < MORNING || shared(key) === today()) return;
+    setShared(key, today());
+    const due = dueNow(this.board()), cards = [...due.overdue, ...due.today];
+    if (!cards.length) return;
+    notify({
+      title: `Kanban: ${dueText(due)}`,
+      body: cards.slice(0, 4).map((c) => c.title).join(" · ") + (cards.length > 4 ? ` +${cards.length - 4}` : ""),
+      level: due.overdue.length ? "warning" : "info",
+      action: { name: "tab.new", args: { name: "Kanban", mod: "kanban" } },
+    });
+  }
+
+  renderStatus(t) {
+    const due = dueNow(this.board()), text = dueText(due);
+    const color = due.overdue.length ? t.ansi1 : due.today.length ? t.ansi3 : t.dim;
+    return h_flex().id("kanban-status").size_full().px(10).gap(6).items_center().justify_center()
+      .bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8).text_color(t.muted).cursor_pointer()
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_click(() => openBoard(this.boardName))
+      .child(svg("mods/kanban/kanban.svg").flex_none().size(13).text_color(text ? color : t.dim))
+      .child(div().truncate().text_color(text ? color : t.dim).child(text || "nothing due"));
   }
 
   initBoard(cx) {
@@ -140,6 +209,7 @@ export default class Kanban extends View {
       const b = this.board();
       if (b.columns.some((col) => finished(col) && col.cards.some((c) => !c.doneAt))) this.save(() => {});
       this.sweep();
+      this.morning();
     };
     tick();
     cx.timer.every(600000, (cx) => { tick(); if (this.day !== today()) cx.notify(); });
@@ -685,6 +755,7 @@ export default class Kanban extends View {
   render() {
     const t = theme();
     if (this.open) return this.renderDetail(t);
+    if (this.status) return this.renderStatus(t);
     this.day = today();
     const b = this.board();
     const stop = (_e, cx) => cx.stop_propagation();
