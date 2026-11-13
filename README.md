@@ -10,7 +10,7 @@ red when overdue, yellow when due today or tomorrow, and blue when due within th
 
 ## Install
 
-Ask an agent in Herdr to add `http://mnemosyne:3000/herdr-mods/herdr-kanban/src/branch/main/kanban`,
+Ask an agent in Herdr to add `https://github.com/enexolgort/herdr-kanban/tree/main/kanban`,
 or by hand:
 
 1. Copy `kanban/mods/kanban` to `~/.config/herdr-app/mods/`, the whole folder at once (so
