@@ -63,6 +63,55 @@ from their due date.
   closes the dialog. If the card is deleted elsewhere, the dialog says so.
 - Due colors re-check every 10 minutes, so they move at midnight without any other change.
 
+## Since 0.2.0
+
+- **Header**, left to right: icon, "Kanban", `N cards` (or `2 of 5 cards` while filtering), a
+  220 px search box (⌕, × to clear, accent border while focused), one filter chip per label in
+  use (dot + name; on: the label's color at alpha `33`), "Archive" with a count (or "← Board"),
+  "+ Column", and a 28 px "?" button. The filter chips take the leftover width and scroll
+  sideways; everything else keeps its size. "?" shows a strip of keys under the header.
+- **Card**, top to bottom: label pills (the label's color, background at alpha `33`, 10.5 px);
+  title; description preview; the linked tab (a `hover` row: status dot, tab name, status word
+  in its color — `working`, `blocked` "needs you", `done`, `idle`; "(closed)" in `dim` when the
+  tab is gone); then badges: priority ("▲ High" in `ansi5`, "▼ Low" in `dim`), due, tasks.
+  Priority also draws a 4 px stripe down the left edge in its color. The selected card has a
+  2 px `accent` border and a medium shadow.
+- **Open card** rows, each with a 46 px `dim` label: Priority (▼ Low / Normal / ▲ High),
+  Labels (chips to toggle, × on a label no card uses, "+ Label" input), Due, Tab ("Link a tab…"
+  opens a list of every tab grouped by space, uppercase space names, a status dot per tab, and
+  excludes the board's own tab; once linked: "space › tab", its status, Go to tab, Change,
+  Unlink). The footer button is "Archive card".
+- **Archive view** (replaces the columns): a `dim` line saying what lands here and how many,
+  then one row per archived card (`surface`, 8 px radius): labels, title, "Archived 13 Nov ·
+  from Done · ☑ 1/1" ("Archived by itself" when automatic), Restore and Delete forever (in
+  `blocked`).
+- **Status bar block** (`props {status: true}`), like the shipped cost block: `chrome`
+  background, top border, 11.8 px. The kanban icon and "1 overdue · 2 due today" in `ansi1`
+  when something is overdue, in `ansi3` when only today, or "nothing due" in `dim`. Click:
+  show the space's Kanban tab or open one.
+
+Behavior:
+
+- Priority sorts each column on display (high, normal, low; a stable sort, so manual order holds
+  within a priority). Shift + ↑ ↓ only swaps cards of the same priority.
+- Search: every word must appear in the title, description, task texts, label names or linked
+  tab name (case-insensitive). It combines with the single-label filter. A filter on a label
+  that stops being used clears itself.
+- Keys (board copy, after a click on it or `pane.go`; ignored while an input or the search has
+  the keyboard): arrows or h j k l select (left/right jump to the nearest column with cards,
+  keeping the row), Enter opens, Shift + ← → moves a column over, Shift + ↑ ↓ swaps with the
+  neighbour, n starts "+ Add card" in the selected card's column (else the first), / focuses
+  the search, x or Delete archives and selects the next card, ? toggles the key strip, and Esc
+  clears an input, then the search, then the strip, then the selection.
+- Archive: every save stamps `doneAt` (today) on cards in a finished column and removes it
+  elsewhere. Every 10 minutes (and when a board opens), cards whose `doneAt` is 14 days old
+  (`ARCHIVE_AFTER`) move to `b.archive` with `auto: true`. Restore removes `doneAt` and appends
+  the card to the column it left (or the first).
+- Morning notification: from 8:00 local (`MORNING`), the first copy that checks (board on its
+  10-minute tick, or status block) sets `kanban.notified.<board>` to today and, if anything is
+  overdue or due today, posts `notify({ title: "Kanban: 1 overdue · 2 due today", body: first
+  four titles, level: overdue ? "warning" : "info", action: tab.new Kanban })`.
+
 ## Built from
 
 - One mod, `mods/kanban` (`main.js`, `mod.json` `{ "place": "none", "title": "Kanban" }`,
@@ -70,8 +119,15 @@ from their due date.
   renders the dialog, otherwise the board. A card opens with
   `openOverlay({ mod: "kanban", kind: "dialog", width: 540, height: 660, props: { board, open: cardId } })`.
 - State: `shared("kanban.board.<name>")` / `setShared`. The value is
-  `{ columns: [{ id, name, cards: [{ id, title, description?, due?: "YYYY-MM-DD", tasks?: [{ id, text, done }] }] }] }`,
-  seeded with To do / Doing / Done. Every change clones the board, edits it and sets it again.
+  `{ columns: [{ id, name, cards: [Card] }], labels?: [{ id, name, color }], archive?: [Card & { archivedAt, from, fromName, auto? }] }`
+  with `Card = { id, title, description?, due?: "YYYY-MM-DD", priority?: "high" | "low", labels?: [id], link?: { tab, space, name }, doneAt?, tasks?: [{ id, text, done }] }`,
+  seeded with To do / Doing / Done (and bug / feature / homelab / idea as labels until the
+  board saves its own). Every change clones the board, edits it and sets it again.
+- Three modes of one view class: `props().open` (the card dialog), `props().status` (the status
+  bar block), else the board. `mod.json` is `focusable`, and the board answers `"focus"` from
+  `nextCommand()` by focusing its handle.
+- Linked tabs read `spaces()` (each tab's `status`) and `panes()` (an unnamed tab's agent
+  name); going there runs `space.select` then `tab.select`.
 - gpui-base: `InputState` + `Input` (one at a time on the board, re-created for each edit),
   `TextareaState` + `Textarea` (`set_auto_grow(3, 12)`), `CalendarState`
   (`month_days()[0]`, `prev_month` / `next_month`, drawn by hand).
@@ -111,8 +167,15 @@ from a key, handle `"kanban"` from `nextCommand()` in the tab bar and bind
 - A `blur` from an input that has already been replaced must be ignored: each handler checks
   that its input is still the current one.
 - `flex_shrink()` needs an argument.
-- `herdr-app check` renders only the board with empty shared state. The dialog, the due colors
-  and descriptions run only in the app.
+- `herdr-app check` renders only the board with empty shared state. The dialog, the due colors,
+  descriptions, the archive view and the status block run only in the app.
+- Key events bubble from a focused input to the board, so the key handler must ignore
+  everything but Esc while an input or the search has the keyboard, or typing "n" adds a card.
+- Several copies run at once (each tab, the status block): the archive sweep and the morning
+  check must be safe to repeat. The sweep only moves what is due, and the notification is
+  gated by the shared day mark set before it posts.
+- Label colors are theme names; a hex alpha (`33`, `40`, `4d`) is appended only when the theme
+  color is `#rrggbb`.
 
 ## Done when
 
@@ -125,3 +188,11 @@ from a key, handle `"kanban"` from `nextCommand()` in the tab bar and bind
   ticking it makes `1/1`.
 - Tomorrow turns the card yellow. A date in the past turns it red, except in Done.
 - A description shows under the card's title on the board.
+- A card linked to a tab with a working agent shows "working" in the `working` color; clicking
+  it switches to that tab.
+- Choosing a label filter or typing in the search hides the other cards and the count says "N
+  of M cards".
+- A High card shows first in its column with a magenta stripe.
+- After a click on the board, ↓ selects a card and Enter opens it.
+- × on a card puts it in Archive. Restore brings it back to its column.
+- The status bar block reads "1 overdue" in red when a card's date has passed.

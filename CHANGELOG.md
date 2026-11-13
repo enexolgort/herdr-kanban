@@ -4,6 +4,8 @@ All notable changes to the Kanban mod. Dates are when the change was made.
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-13
+
 ### New
 
 - **Link a card to a tab.** In an open card, "Link a tab…" lists every tab, grouped by space,
