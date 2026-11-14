@@ -6,7 +6,7 @@ A Kanban board in its own tab. Columns of cards, which you drag between columns 
 ‹ › or the keyboard. Click a card to open it: title, column, priority, labels, due date, a
 linked tab, description and a task list. Cards turn red when overdue, yellow when due today or
 tomorrow, and blue when due within the week. A card linked to a tab shows that tab's agent
-status live (working, needs you, done). Search and a label filter narrow the board. Removed and
+status live (working, needs you, done). Each card logs when it changes column, and cards that sit still show their days in the column (grey from 3 days, cyan from 7). Search and a label filter narrow the board. Removed and
 old Done cards go to an archive you can restore from. A status-bar block and a morning
 notification tell you what's due. See [CHANGELOG.md](CHANGELOG.md).
 

@@ -112,6 +112,16 @@ Behavior:
   overdue or due today, posts `notify({ title: "Kanban: 1 overdue · 2 due today", body: first
   four titles, level: overdue ? "warning" : "info", action: tab.new Kanban })`.
 
+## Since 0.3.0
+
+- **History**: `move()`, adding, `archiveCard()` and `restore()` push `{ at, from, to }`
+  (column names; `from` missing when created, `"Archive"` for the archive, `start: true` for
+  the entry seeded on cards that had none). The open card lists it newest first below Tasks,
+  with "N days in <column>" beside the heading.
+- **Stale**: days since the last history entry (local calendar days) ≥ `STALE_AFTER` (7), not
+  in a finished column: dashed `ansi6` border (unless a due color), background `ansi6` at
+  alpha `14`, badge "⏳ Nd here".
+
 ## Built from
 
 - One mod, `mods/kanban` (`main.js`, `mod.json` `{ "place": "none", "title": "Kanban" }`,
@@ -120,7 +130,7 @@ Behavior:
   `openOverlay({ mod: "kanban", kind: "dialog", width: 540, height: 660, props: { board, open: cardId } })`.
 - State: `shared("kanban.board.<name>")` / `setShared`. The value is
   `{ columns: [{ id, name, cards: [Card] }], labels?: [{ id, name, color }], archive?: [Card & { archivedAt, from, fromName, auto? }] }`
-  with `Card = { id, title, description?, due?: "YYYY-MM-DD", priority?: "high" | "low", labels?: [id], link?: { tab, space, name }, doneAt?, tasks?: [{ id, text, done }] }`,
+  with `Card = { id, title, description?, due?: "YYYY-MM-DD", priority?: "high" | "low", labels?: [id], link?: { tab, space, name }, doneAt?, tasks?: [{ id, text, done }], history?: [{ at: ms, from?, to, auto?, start? }] }`,
   seeded with To do / Doing / Done (and bug / feature / homelab / idea as labels until the
   board saves its own). Every change clones the board, edits it and sets it again.
 - Three modes of one view class: `props().open` (the card dialog), `props().status` (the status

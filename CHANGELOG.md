@@ -4,6 +4,29 @@ All notable changes to the Kanban mod. Dates are when the change was made.
 
 ## Unreleased
 
+## 0.3.0 — 2026-11-14
+
+### New
+
+- **Column history.** Every card logs when it changes column: created, moved (drag, ‹ ›,
+  Shift + ← →, the column chips), archived (by hand or by itself) and restored. An open card
+  shows a History section, newest first ("14 Nov 09:32 · To do → Doing"), and how many days
+  it has been in its column. Cards from before this version start their log the first time a
+  board opens ("tracking started").
+- **Stale cards.** A card that has spent 7 days or more (`STALE_AFTER`) in the same column
+  gets a dashed `ansi6` (cyan) border, a faint cyan background and a "⏳ 9d here" badge. Due
+  colors keep the border and background when they apply. Cards in Done or Archive columns are
+  never stale. From 3 days (`QUIET_AFTER`) a card shows its days in the column in grey
+  ("5d") before it turns cyan at 7.
+- **More keys** on the selected card: `1` `2` `3` set High / Normal / Low, `t` due today, `w`
+  due in a week, `d` clears the due date, `e` renames it in place, and `u` restores the last
+  card archived from this board (several times to go further back). The `?` strip lists them.
+
+### Changed
+
+- "Delete forever" in the archive asks first: the button turns into a red "Really delete?"
+  for 4 seconds, and only a second click deletes.
+
 ## 0.2.0 — 2026-11-13
 
 ### New

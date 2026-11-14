@@ -33,6 +33,24 @@ const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return i
 const daysLeft = (due) => Math.round((Date.parse(`${due}T00:00:00Z`) - Date.parse(`${today()}T00:00:00Z`)) / DAY);
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const short = (due) => `${Number(due.slice(8))} ${MONTHS[Number(due.slice(5, 7)) - 1]}`;
+/** "14 Nov 09:32" for a timestamp (ms), local time. */
+const when = (ms) => { const d = new Date(ms); return `${short(iso(d))} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+
+// ---- History: each card logs when it changed column ({ at: ms, from?, to, auto? }, names) ----
+function logMove(card, from, to, auto = false) {
+  (card.history ??= []).push({ at: Date.now(), ...(from ? { from } : {}), to, ...(auto ? { auto: true } : {}) });
+}
+
+// ---- Stale: a card that has sat STALE_AFTER days or more in the same (unfinished) column ----
+const STALE_AFTER = 7;
+const QUIET_AFTER = 3; // from here a card shows its days in the column in grey ("5d"), cyan once stale
+/** Whole days (local calendar) the card has been in its column, or null when unknown. */
+function daysInColumn(card) {
+  const last = card.history?.[card.history.length - 1];
+  return last ? -daysLeft(iso(new Date(last.at))) : null;
+}
+const stale = (card, col) => !finished(col) && (daysInColumn(card) ?? 0) >= STALE_AFTER;
+
 // Columns whose cards are finished: their due dates no longer warn.
 const finished = (col) => /^(done|archive|archived)$/i.test(col.name.trim());
 
@@ -106,6 +124,7 @@ function archiveCard(b, cardId, auto = false) {
     const i = col.cards.findIndex((x) => x.id === cardId);
     if (i < 0) continue;
     const card = col.cards.splice(i, 1)[0];
+    logMove(card, col.name, "Archive", auto);
     b.archive = [{ ...card, archivedAt: today(), from: col.id, fromName: col.name, ...(auto ? { auto: true } : {}) }, ...(b.archive ?? [])];
     return;
   }
@@ -205,8 +224,12 @@ export default class Kanban extends View {
     // Due colors move at midnight: look again every 10 minutes.
     // The same timer archives Done cards that have waited ARCHIVE_AFTER days (and once now). Cards
     // already in Done without a date get today's, so nothing is archived on the first run.
+    // Cards from before the history log start theirs now (so they can't be stale on day one).
     const tick = () => {
       const b = this.board();
+      if (b.columns.some((col) => col.cards.some((c) => !c.history?.length))) {
+        this.save((bb) => { for (const col of bb.columns) for (const c of col.cards) if (!c.history?.length) c.history = [{ at: Date.now(), to: col.name, start: true }]; });
+      }
       if (b.columns.some((col) => finished(col) && col.cards.some((c) => !c.doneAt))) this.save(() => {});
       this.sweep();
       this.morning();
@@ -538,7 +561,17 @@ export default class Kanban extends View {
           .when(tasks.length > 0, (el) => el.child(div().w(160).h(4).rounded(2).bg(t.hover)
             .child(div().h(4).rounded(2).bg(t.accent).w(Math.round(160 * doneCount / tasks.length))))))
         .children(tasks.map((x, i) => row(x, i)))
-        .child(div().pt(6).child(Input.new(this.task).h(32).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(12.8).text_color(t.foreground))))
+        .child(div().pt(6).child(Input.new(this.task).h(32).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(12.8).text_color(t.foreground)))
+        // History: when the card changed column, newest first.
+        .child(h_flex().px(6).pt(18).pb(6).gap(10).items_center()
+          .child(div().text_size(12.5).font_semibold().child("History"))
+          .when(daysInColumn(card) !== null, (el) => el.child(div().text_size(11.5).text_color(stale(card, col) ? t.ansi6 : t.dim)
+            .child(`${daysInColumn(card)} day${daysInColumn(card) === 1 ? "" : "s"} in ${col.name}`))))
+        .when(!(card.history ?? []).length, (el) => el.child(div().px(6).text_size(11.8).text_color(t.dim).child("No moves recorded yet.")))
+        .children([...(card.history ?? [])].reverse().map((h, i) => h_flex().id(`hist-${i}`).px(6).min_h(22).gap(10).items_center().text_size(11.8)
+          .child(div().w(92).flex_none().text_color(t.dim).child(when(h.at)))
+          .child(div().flex_1().min_w(0).text_color(t.muted).child(
+            h.start ? `In ${h.to} (tracking started)` : h.from ? `${h.from} → ${h.to}${h.auto ? " (by itself)" : ""}` : `Created in ${h.to}`)))))
       .child(h_flex().p(14).gap(8).border_t(1).border_color(t.border)
         .child(button("archive-card", "Archive card", () => { this.save((b) => archiveCard(b, card.id)); close(); }))
         .child(div().flex_1())
@@ -590,7 +623,7 @@ export default class Kanban extends View {
     if (!text) return;
     this.save((b) => {
       const col = b.columns.find((c) => c.id === e.column);
-      if (e.kind === "add" && col) col.cards.push({ id: uid(), title: text });
+      if (e.kind === "add" && col) { const card = { id: uid(), title: text }; logMove(card, null, col.name); col.cards.push(card); }
       if (e.kind === "card" && col) { const card = col.cards.find((c) => c.id === e.card); if (card) card.title = text; }
       if (e.kind === "column" && col) col.name = text;
       if (e.kind === "new-column") b.columns.push({ id: uid(), name: text, cards: [] });
@@ -599,13 +632,15 @@ export default class Kanban extends View {
 
   move(cardId, toColumn, beforeCard) {
     this.save((b) => {
-      let card = null;
+      let card = null, from = null;
+      const to = b.columns.find((c) => c.id === toColumn);
+      if (!to) return;
       for (const c of b.columns) {
         const i = c.cards.findIndex((x) => x.id === cardId);
-        if (i >= 0) card = c.cards.splice(i, 1)[0];
+        if (i >= 0) { card = c.cards.splice(i, 1)[0]; from = c; }
       }
-      const to = b.columns.find((c) => c.id === toColumn);
-      if (!card || !to) return;
+      if (!card) return;
+      if (from.id !== to.id) logMove(card, from.name, to.name);
       const at = beforeCard ? to.cards.findIndex((x) => x.id === beforeCard) : -1;
       if (at >= 0) to.cards.splice(at, 0, card); else to.cards.push(card);
     });
@@ -620,8 +655,17 @@ export default class Kanban extends View {
   // ---- Archive: removing a card puts it here; Done cards go by themselves after ARCHIVE_AFTER days ----
 
   /** Takes a card off the board into the archive (newest first). */
-  remove(cardId, from) {
+  remove(cardId) {
     this.save((b) => archiveCard(b, cardId));
+    (this.undo ??= []).push(cardId); // u brings it back
+  }
+
+  /** u: restores the last card archived from this board copy (if it's still in the archive). */
+  undoArchive() {
+    while (this.undo?.length) {
+      const id = this.undo.pop();
+      if ((this.board().archive ?? []).some((x) => x.id === id)) { this.restore(id); this.sel = id; return; }
+    }
   }
 
   /** Archives cards that have been in a finished column for ARCHIVE_AFTER days. */
@@ -638,7 +682,9 @@ export default class Kanban extends View {
       if (i < 0) return;
       const { archivedAt, from, fromName, auto, ...card } = b.archive.splice(i, 1)[0];
       delete card.doneAt; // a restored Done card starts its 14 days again
-      (b.columns.find((c) => c.id === from) ?? b.columns[0]).cards.push(card);
+      const col = b.columns.find((c) => c.id === from) ?? b.columns[0];
+      logMove(card, "Archive", col.name);
+      col.cards.push(card);
     });
   }
 
@@ -722,10 +768,22 @@ export default class Kanban extends View {
     if ((k === "x" || k === "delete") && ci >= 0) {
       cx.stop_propagation();
       const next = cols[ci].cards[ri + 1] ?? cols[ci].cards[ri - 1];
-      this.remove(this.sel, cols[ci].col.id);
+      this.remove(this.sel);
       this.sel = next?.id ?? null;
       return cx.notify();
     }
+    if (k === "u") { cx.stop_propagation(); this.undoArchive(); return cx.notify(); }
+    // On the selected card: 1 2 3 priority, t w due, d clears the due date, e renames it.
+    const card = ci >= 0 ? cols[ci].cards[ri] : null;
+    if (!card) return;
+    const set = (fn) => { cx.stop_propagation(); this.save((bb) => { for (const col of bb.columns) for (const x of col.cards) if (x.id === card.id) fn(x); }); cx.notify(); };
+    if (k === "1") return set((x) => { x.priority = "high"; });
+    if (k === "2") return set((x) => { delete x.priority; });
+    if (k === "3") return set((x) => { x.priority = "low"; });
+    if (k === "t") return set((x) => { x.due = today(); });
+    if (k === "w") return set((x) => { x.due = plus(7); });
+    if (k === "d") return set((x) => { delete x.due; });
+    if (k === "e") { cx.stop_propagation(); this.start({ kind: "card", column: cols[ci].col.id, card: card.id }, card.title, "Card title"); return cx.notify(); }
     if (e.key_char === "?") { this.showKeys = !this.showKeys; return cx.notify(); }
   }
 
@@ -772,8 +830,11 @@ export default class Kanban extends View {
       // Due soon or overdue: the card takes that color (border, tinted background, date badge).
       const u = urgency(c.due, col), hue = u?.color ? t[u.color] : null;
       const pr = PRIORITY[c.priority];
+      // Stuck: STALE_AFTER days or more in this column. A cyan border (unless the due color has it) and a badge.
+      const old = stale(c, col);
       return v_flex().id(`card-${c.id}`).relative().p(9).pl(pr ? 12 : 9).gap(4).rounded(8).border_1()
-        .border_color(dragging || this.sel === c.id ? t.accent : hue ?? t.border).bg(hue ? tint(hue, "26") : t.raised).opacity(dragging ? 0.5 : 1)
+        .border_color(dragging || this.sel === c.id ? t.accent : hue ?? (old ? t.ansi6 : t.border)).bg(hue ? tint(hue, "26") : old ? tint(t.ansi6, "14") : t.raised).opacity(dragging ? 0.5 : 1)
+        .when(old, (el) => el.border_dashed())
         .when(this.sel === c.id && !dragging, (el) => el.border_2().shadow_md())
         .cursor_pointer().hover((s) => s.border_color(hue ?? t.input))
         .on_mouse_down("left", (_e, cx) => {
@@ -817,6 +878,10 @@ export default class Kanban extends View {
             .child(`${pr.mark} ${pr.label}`)))
           .when(Boolean(u), (el) => el.child(div().px(6).rounded(6).text_size(11)
             .bg(hue ? tint(hue, "40") : t.hover).text_color(hue ? t.foreground : t.muted).child(`📅 ${u.label.replace(/^Due (?=\d)/, "")}`)))
+          .when(old, (el) => el.child(div().px(6).rounded(6).text_size(11).bg(tint(t.ansi6, "33")).text_color(t.ansi6)
+            .child(`⏳ ${daysInColumn(c)}d here`)))
+          .when(!old && !finished(col) && (daysInColumn(c) ?? 0) >= QUIET_AFTER, (el) => el.child(div().px(6).rounded(6).text_size(11)
+            .bg(t.hover).text_color(t.dim).child(`${daysInColumn(c)}d`)))
           .when((c.tasks ?? []).length > 0, (el) => {
             const n = c.tasks.length, d = c.tasks.filter((x) => x.done).length;
             return el.child(div().px(6).rounded(6).text_size(11).bg(d === n ? t.selected : t.hover)
@@ -908,7 +973,8 @@ export default class Kanban extends View {
       .when(this.showKeys, (el) => el.child(h_flex().flex_none().px(16).py(8).gap(18).flex_wrap().border_b(1).border_color(t.border)
         .bg(t.surface).text_size(11.5).text_color(t.muted)
         .children([["← → ↑ ↓  h j k l", "select"], ["Enter", "open"], ["Shift ← →", "move to column"], ["Shift ↑ ↓", "move up/down"],
-          ["n", "new card"], ["/", "search"], ["x  Del", "archive"], ["Esc", "clear"]]
+          ["n", "new card"], ["e", "rename"], ["1 2 3", "high/normal/low"], ["t  w", "due today/in a week"], ["d", "clear due"],
+          ["/", "search"], ["x  Del", "archive"], ["u", "undo archive"], ["Esc", "clear"]]
           .map(([keys, what]) => h_flex().gap(6).child(div().px(5).rounded(4).bg(t.hover).text_color(t.foreground).child(keys)).child(what)))))
       .child(this.showArchive ? this.renderArchive(t, b)
         // The board scrolls as a whole: down when a column runs long, sideways when columns don't fit.
@@ -924,7 +990,7 @@ export default class Kanban extends View {
     const byId = new Map(boardLabels(b).map((l) => [l.id, l]));
     const btn = (id, label, action, danger) => h_flex().id(id).flex_none().h(26).px(10).items_center().rounded(6).text_size(12)
       .border_1().border_color(t.border).text_color(danger ? t.blocked : t.foreground).cursor_pointer().hover((s) => s.bg(t.hover))
-      .on_click((_e, cx) => { action(); cx.notify(); }).child(label);
+      .on_click((_e, cx) => { action(cx); cx.notify(); }).child(label);
     const row = (c) => h_flex().id(`ar-${c.id}`).px(14).py(10).gap(12).items_center().rounded(8).border_1().border_color(t.border).bg(t.surface)
       .child(v_flex().flex_1().min_w(0).gap(4)
         .when((c.labels ?? []).length > 0, (el) => el.child(h_flex().gap(4).children(c.labels.map((id) => byId.get(id)).filter(Boolean).map((l) => pill(t, l)))))
@@ -933,7 +999,15 @@ export default class Kanban extends View {
           `${c.auto ? "Archived by itself" : "Archived"} ${short(c.archivedAt)} · from ${c.fromName ?? "?"}` +
           ((c.tasks ?? []).length ? ` · ☑ ${c.tasks.filter((x) => x.done).length}/${c.tasks.length}` : ""))))
       .child(btn(`rs-${c.id}`, "Restore", () => this.restore(c.id)))
-      .child(btn(`fg-${c.id}`, "Delete forever", () => this.forget(c.id), true));
+      .child(this.confirmForget === c.id
+        // Second step: a filled red button; anything else (or 4 s) backs out.
+        ? h_flex().id(`fg-${c.id}`).flex_none().h(26).px(10).items_center().rounded(6).text_size(12).font_semibold()
+          .bg(t.blocked).text_color(t.background).cursor_pointer()
+          .on_click((_e, cx) => { this.confirmForget = null; this.forget(c.id); cx.notify(); }).child("Really delete?")
+        : btn(`fg-${c.id}`, "Delete forever", (cx) => {
+          const id = this.confirmForget = c.id;
+          cx.timer.after(4000, (acx) => { if (this.confirmForget === id) { this.confirmForget = null; acx.notify(); } });
+        }, true));
     return v_flex().id("archive").flex_1().min_h(0).overflow_y_scrollbar().p(14).gap(8)
       .child(div().text_size(12).text_color(t.dim).pb(4).child(
         `Removed cards land here, and cards that sit ${ARCHIVE_AFTER} days in Done go here by themselves. ` +
